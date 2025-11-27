@@ -11,7 +11,6 @@ DB_CONFIG = {
 }
 
 # --- PARÂMETROS PARA AS CONSULTAS (MODIFICADO PARA INPUT) ---
-# O sistema agora irá questionar esses valores antes de rodar as consultas
 BRAND_ID = input("Digite o BRAND_ID: ")
 DATE_BEGIN = input("Digite a data de início (formato YYYY-MM-DD): ")
 DATE_UNTIL = input("Digite a data de término (formato YYYY-MM-DD): ")
@@ -70,95 +69,144 @@ def execute_query(query, params):
 
 def export_queries_to_single_csv(file_name, queries_data):
     """
-    Exporta dados de múltiplas consultas com colunas diferentes para um único arquivo CSV.
+    Exporta dados de múltiplas consultas lado a lado como colunas em um único arquivo CSV.
     """
     with open(file_name, 'w', newline='', encoding='utf-8') as csv_file:
-        writer = csv.writer(csv_file)
+        writer = csv.writer(csv_file, delimiter=';')
 
-        for i, query_result in enumerate(queries_data):
-            if i > 0:
-                writer.writerow([])
-                writer.writerow([])
-                writer.writerow([])
+        # Escrever cabeçalhos (nomes das colunas)
+        headers = [q['name'] for q in queries_data]
+        writer.writerow(headers)
+        
+        # Escrever dados linha por linha, lado a lado
+        for row_idx in range(1):  # Apenas uma linha de dados por coluna
+            row_data = []
+            for query_result in queries_data:
+                if query_result['data']:
+                    # Pega o primeiro valor da tupla
+                    value = query_result['data'][0][0] if query_result['data'][0] else ''
+                    row_data.append(value)
+                else:
+                    row_data.append('')
+            writer.writerow(row_data)
 
-            writer.writerow([f'{query_result["name"]}'])
-            writer.writerow(query_result['headers'])
-            writer.writerows(query_result['data'])
-
-QUERY_CAMPANHAS_CRIADAS = """
-SELECT
-    COUNT(*) AS 'Campanhas criadas',
-    CASE
-        WHEN type_delivery = 1 THEN 'Email'
-        WHEN type_delivery = 2 THEN 'SMS'
-        WHEN type_delivery = 5 THEN 'Agenda'
-        WHEN type_delivery = 6 THEN 'Engage SMS'
-        WHEN type_delivery = 7 THEN 'Engage email'
-        WHEN type_delivery = 4 THEN 'Campanha de bônus'
-    END AS Tipo_Campanha
-FROM
-    cli_campaign
-WHERE brand_id = {{brand_id}} AND created_at BETWEEN '{{date_begin}}' AND '{{date_until}}'
-GROUP BY Tipo_Campanha;
+# === QUERIES PARA CAMPANHAS CRIADAS ===
+QUERY_CAMPANHAS_EMAIL = """
+SELECT COUNT(*) 
+FROM cli_campaign
+WHERE brand_id = {{brand_id}} AND type_delivery = 1 AND created_at BETWEEN '{{date_begin}}' AND '{{date_until}}';
 """
 
-QUERY_BASE_IMPACTADA = """
-SELECT
-    COUNT(customer_id) as 'Quantidade de clientes impactados',
-    CASE
-        WHEN delivery_type = 1 THEN 'Email'
-        WHEN delivery_type = 2 THEN 'SMS'
-        WHEN delivery_type = 5 THEN 'Agenda'
-        WHEN delivery_type = 6 THEN 'Engage SMS'
-        WHEN delivery_type = 7 THEN 'Engage email'
-        WHEN delivery_type = 4 THEN 'Campanha de bônus'
-    END AS 'Tipo Campanha'
-FROM cli_campaign_return ccr
-WHERE brand_id = {{brand_id}}
-AND delivered_at BETWEEN '{{date_begin}}' AND '{{date_until}}'
-GROUP BY delivery_type;
+QUERY_CAMPANHAS_SMS = """
+SELECT COUNT(*) 
+FROM cli_campaign
+WHERE brand_id = {{brand_id}} AND type_delivery = 2 AND created_at BETWEEN '{{date_begin}}' AND '{{date_until}}';
 """
 
-QUERY_NUMERO_DE_LOJAS = """
-SELECT
-    COUNT(*) AS 'Quantidade de lojas',
-    CASE
-        WHEN status_id = 1 THEN 'Ativa pagante'
-        ELSE 'Onboarding'
-    END AS 'Status'
+QUERY_CAMPANHAS_AGENDA = """
+SELECT COUNT(*) 
+FROM cli_campaign
+WHERE brand_id = {{brand_id}} AND type_delivery = 5 AND created_at BETWEEN '{{date_begin}}' AND '{{date_until}}';
+"""
+
+# === QUERIES PARA BASE IMPACTADA ===
+QUERY_BASE_IMPACTADA_EMAIL = """
+SELECT COUNT(DISTINCT customer_id) 
+FROM cli_campaign_return
+WHERE brand_id = {{brand_id}} AND delivery_type = 1 AND delivered_at BETWEEN '{{date_begin}}' AND '{{date_until}}';
+"""
+
+QUERY_BASE_IMPACTADA_SMS = """
+SELECT COUNT(DISTINCT customer_id) 
+FROM cli_campaign_return
+WHERE brand_id = {{brand_id}} AND delivery_type = 2 AND delivered_at BETWEEN '{{date_begin}}' AND '{{date_until}}';
+"""
+
+QUERY_BASE_IMPACTADA_AGENDA = """
+SELECT COUNT(DISTINCT customer_id) 
+FROM cli_campaign_return
+WHERE brand_id = {{brand_id}} AND delivery_type = 5 AND delivered_at BETWEEN '{{date_begin}}' AND '{{date_until}}';
+"""
+
+# === QUERIES PARA LOJAS ===
+QUERY_LOJAS_ATIVAS = """
+SELECT COUNT(*) 
 FROM cli_store
-WHERE brand_id = {{brand_id}} AND status_id IN (7,1)
-GROUP BY status_id;
+WHERE brand_id = {{brand_id}} AND status_id = 1;
 """
 
-QUERY_NUMERO_DE_LOJAS_INADIMPLENTES = """
-SELECT
-    friendly_name AS 'Nome da Loja',
-    cnpj AS 'CNPJ'
+QUERY_LOJAS_ONBOARDING = """
+SELECT COUNT(*) 
 FROM cli_store
-WHERE brand_id = {{brand_id}} AND status_id = 6;
+WHERE brand_id = {{brand_id}} AND status_id = 7;
+"""
+
+# === QUERIES PARA RETORNO (RFU) ===
+QUERY_RFU_GATILHOS = """
+SELECT COALESCE(SUM(q2.total_consolidated - q2.debit_sum), 0)
+from
+  (
+    select
+      q.customer_id,
+      q.brand_id,
+      sum(q.total_amount) as total_consolidated,
+      SUM(
+        CASE WHEN q.resource_name IN ('cli_transaction') THEN IFNULL(debits.total, 0) ELSE 0 END
+      ) as debit_sum
+    from
+      (
+        select
+          cli_order_convertion.brand_id,
+          cli_order_convertion.store_id,
+          cli_order_convertion.order_id,
+          cli_order_convertion.customer_id,
+          cli_order.total_amount,
+          cli_order_convertion.resource_name,
+          cli_order.store_id
+        from
+          cli_order_convertion
+          inner join cli_order on cli_order.brand_id = cli_order_convertion.brand_id
+          and cli_order.customer_id = cli_order_convertion.customer_id
+          and cli_order.id = cli_order_convertion.order_id
+        where
+          cli_order_convertion.brand_id = {{brand_id}}
+          and cli_order_convertion.resource_name in ('cli_email_type', 'cli_trigger')
+          and cli_order_convertion.converted_at >= '{{date_begin}} 00:00:00'
+          and cli_order_convertion.converted_at <= '{{date_until}} 23:59:59'
+          and cli_order.total_amount > 0
+          and cli_order_convertion.dropped = 0
+      ) as q
+      left join (
+        select
+          cli_transaction.order_id,
+          cli_transaction.brand_id,
+          sum(cli_transaction.amount) AS total
+        from cli_transaction
+        where
+          cli_transaction.brand_id = {{brand_id}}
+          and cli_transaction.transaction_date >= '{{date_begin}} 00:00:00'
+          and cli_transaction.transaction_date <= '{{date_until}} 23:59:59'
+          and cli_transaction.transaction_type_id in ('7')
+          and cli_transaction.order_id is not null
+          and cli_transaction.order_id > 0
+        group by cli_transaction.brand_id, cli_transaction.order_id
+      ) as debits on debits.brand_id = q.brand_id
+      and debits.order_id = q.order_id
+    group by q.customer_id
+  ) as q2;
 """
 
 QUERY_RFU_CAMPANHAS = """
-select
-  SUM(
-    q2.total_consolidated - q2.debit_sum
-  ) as 'Retorno via campanhas'
+SELECT COALESCE(SUM(q2.total_consolidated - q2.debit_sum), 0)
 from
   (
     select
-      q.return_days as return_days,
       q.customer_id,
       q.brand_id,
       sum(q.total_amount) as total_consolidated,
       SUM(
         CASE WHEN q.resource_name IN ('cli_transaction') THEN IFNULL(debits.total, 0) ELSE 0 END
-      ) as debit_sum,
-      GROUP_CONCAT(DISTINCT store_name separator '|') AS store_names,
-      GROUP_CONCAT(DISTINCT order_date separator '|') AS order_date,
-      count(q.order_id) as orders_count,
-      q.store_id,
-      q.employee_id
+      ) as debit_sum
     from
       (
         select
@@ -166,208 +214,53 @@ from
           cli_order_convertion.store_id,
           cli_order_convertion.order_id,
           cli_order_convertion.customer_id,
-          cli_order.employee_id,
           cli_order.total_amount,
-          DATE(
-            cli_order_convertion.converted_at
-          ) as converted_at,
-          (
-            DATEDIFF(
-              MIN(
-                cli_order_convertion.converted_at
-              ),
-              (
-                SELECT
-                  max(cli_order.order_date)
-                FROM
-                  cli_order
-                WHERE
-                  cli_order.brand_id = cli_order_convertion.brand_id
-                  AND cli_order.customer_id = cli_order_convertion.customer_id
-                  AND cli_order.order_date < min(
-                    cli_order_convertion.converted_at
-                  )
-              )
-            )
-          ) as return_days,
           cli_order_convertion.resource_name,
-          cli_store.name AS store_name,
-          date(cli_order.order_date) as order_date
+          cli_order.store_id
         from
           cli_order_convertion
           inner join cli_order on cli_order.brand_id = cli_order_convertion.brand_id
           and cli_order.customer_id = cli_order_convertion.customer_id
           and cli_order.id = cli_order_convertion.order_id
-          inner join cli_store_cache as cli_store on cli_store.brand_id = cli_order_convertion.brand_id
-          and cli_store.id = cli_order.store_id
-          left join cli_trigger_return on cli_trigger_return.brand_id = cli_order_convertion.brand_id
-          and cli_trigger_return.customer_id = cli_order_convertion.customer_id
-          and (
-            (
-              cli_trigger_return.trigger_id = cli_order_convertion.resource_id
-              AND cli_order_convertion.resource_name = 'cli_trigger'
-            )
-            OR (
-              cli_trigger_return.email_type_id = cli_order_convertion.resource_id
-              AND cli_order_convertion.resource_name = 'cli_email_type'
-            )
-          )
         where
-          cli_order_convertion.brand_id = '8'
-          and cli_order_convertion.store_id in (select distinct id from cli_store where brand_id = 8 and status_id in (1,2,5,7))
+          cli_order_convertion.brand_id = {{brand_id}}
           and cli_order_convertion.resource_name in ('cli_campaign')
-          and cli_order_convertion.converted_at >= '2025-06-01 00:00:00'
-          and cli_order_convertion.converted_at <= '2025-06-30 23:59:59'
-          and cli_order.total_amount > '0'
-          and cli_order_convertion.dropped = '0'
-          and CASE WHEN cli_order_convertion.resource_name = 'cli_telemarketing_registry' THEN EXISTS (
-            select
-              1
-            from
-              cli_telemarketing_registry
-            where
-              cli_telemarketing_registry.brand_id = '8'
-              and cli_telemarketing_registry.store_id in (select distinct id from cli_store where brand_id = 8 and status_id in (1,2,5,7))
-              and cli_telemarketing_registry.id = cli_order_convertion.resource_id
-              and cli_telemarketing_registry.store_id = cli_order.store_id
-            limit
-              1
-          ) WHEN cli_order_convertion.resource_name = 'cli_campaign' THEN EXISTS (
-            SELECT
-              1
-            FROM
-              cli_store_log_status
-            WHERE
-              cli_store_log_status.brand_id = cli_order_convertion.brand_id
-              AND cli_store_log_status.store_id = cli_order.store_id
-              AND cli_store_log_status.status_id in (1, 2, 5, 7)
-              AND EXTRACT(
-                YEAR_MONTH
-                FROM
-                  cli_store_log_status.created_at
-              ) >= EXTRACT(
-                YEAR_MONTH
-                FROM
-                  cli_order_convertion.converted_at
-              )
-            LIMIT
-              1
-          ) AND EXISTS (
-            SELECT
-              1
-            FROM
-              cli_campaign_store
-              JOIN cli_campaign ON cli_campaign.id = cli_campaign_store.campaign_id
-              AND cli_campaign.brand_id = cli_campaign_store.brand_id
-              AND cli_campaign.active = 1
-              AND cli_campaign.type_delivery in (1, 2, 6, 7)
-            WHERE
-              cli_campaign_store.brand_id = cli_order_convertion.brand_id
-              AND cli_campaign_store.campaign_id = cli_order_convertion.resource_id
-              AND IFNULL(
-                cli_campaign_store.store_id, cli_order.store_id
-              ) = cli_order.store_id
-              AND CASE WHEN cli_campaign.identity_id = 0 THEN 1 ELSE cli_campaign.identity_id = cli_store.identity_id END
-            LIMIT
-              1
-          ) WHEN cli_order_convertion.resource_name IN (
-            'cli_email_type', 'cli_trigger',
-            'cli_instagram_media_tracking'
-          ) THEN EXISTS (
-            SELECT
-              1
-            FROM
-              cli_store_log_status
-            WHERE
-              cli_store_log_status.brand_id = cli_order_convertion.brand_id
-              AND cli_store_log_status.store_id = cli_order.store_id
-              AND cli_store_log_status.status_id in (1, 2, 5, 7)
-              AND EXTRACT(
-                YEAR_MONTH
-                FROM
-                  cli_store_log_status.created_at
-              ) >= EXTRACT(
-                YEAR_MONTH
-                FROM
-                  cli_order_convertion.converted_at
-              )
-            LIMIT
-              1
-          ) WHEN cli_order_convertion.resource_name IN ('cli_transaction') THEN cli_order.store_id IN (
-            SELECT
-              id
-            FROM
-              cli_store_cache
-            WHERE
-              brand_id = '8'
-              AND status_id in (1, 2, 5, 7)
-          ) ELSE 1 END = 1
-          and exists (
-            select
-              1
-            from
-              cli_order
-            where
-              cli_order.brand_id = '8'
-              and cli_order.store_id in (select distinct id from cli_store where brand_id = 8 and status_id in (1,2,5,7))
-              and cli_order.id = cli_order_convertion.order_id
-            limit
-              1
-          )
-        group by
-          cli_order_convertion.order_id,
-          cli_order_convertion.customer_id
-        order by
-          order_date desc
+          and cli_order_convertion.converted_at >= '{{date_begin}} 00:00:00'
+          and cli_order_convertion.converted_at <= '{{date_until}} 23:59:59'
+          and cli_order.total_amount > 0
+          and cli_order_convertion.dropped = 0
       ) as q
       left join (
         select
           cli_transaction.order_id,
           cli_transaction.brand_id,
           sum(cli_transaction.amount) AS total
-        from
-          cli_transaction
-          left join cli_store_cache as cli_store on cli_store.brand_id = cli_transaction.brand_id
-          and cli_store.id = cli_transaction.store_id
+        from cli_transaction
         where
-          cli_transaction.brand_id = '8'
-          and cli_transaction.store_id in (select distinct id from cli_store where brand_id = 8 and status_id in (1,2,5,7))
-          and cli_transaction.transaction_date >= '2025-06-01 00:00:00'
-          and cli_transaction.transaction_date <= '2025-06-30 23:59:59'
+          cli_transaction.brand_id = {{brand_id}}
+          and cli_transaction.transaction_date >= '{{date_begin}} 00:00:00'
+          and cli_transaction.transaction_date <= '{{date_until}} 23:59:59'
           and cli_transaction.transaction_type_id in ('7')
           and cli_transaction.order_id is not null
-          and cli_transaction.order_id > '0'
-        group by
-          cli_transaction.brand_id,
-          cli_transaction.order_id
+          and cli_transaction.order_id > 0
+        group by cli_transaction.brand_id, cli_transaction.order_id
       ) as debits on debits.brand_id = q.brand_id
       and debits.order_id = q.order_id
-    group by
-      q.customer_id
-  ) as q2
-  inner join cli_brand on cli_brand.id = q2.brand_id
-  """
+    group by q.customer_id
+  ) as q2;
+"""
 
 QUERY_RFU_CASHBACK = """
-select
-  SUM(
-    q2.total_consolidated - q2.debit_sum
-  ) as orders_sum
+SELECT COALESCE(SUM(q2.total_consolidated - q2.debit_sum), 0)
 from
   (
     select
-      q.return_days as return_days,
       q.customer_id,
       q.brand_id,
       sum(q.total_amount) as total_consolidated,
       SUM(
         CASE WHEN q.resource_name IN ('cli_transaction') THEN IFNULL(debits.total, 0) ELSE 0 END
-      ) as debit_sum,
-      GROUP_CONCAT(DISTINCT store_name separator '|') AS store_names,
-      GROUP_CONCAT(DISTINCT order_date separator '|') AS order_date,
-      count(q.order_id) as orders_count,
-      q.store_id,
-      q.employee_id
+      ) as debit_sum
     from
       (
         select
@@ -375,420 +268,53 @@ from
           cli_order_convertion.store_id,
           cli_order_convertion.order_id,
           cli_order_convertion.customer_id,
-          cli_order.employee_id,
           cli_order.total_amount,
-          DATE(
-            cli_order_convertion.converted_at
-          ) as converted_at,
-          (
-            DATEDIFF(
-              MIN(
-                cli_order_convertion.converted_at
-              ),
-              (
-                SELECT
-                  max(cli_order.order_date)
-                FROM
-                  cli_order
-                WHERE
-                  cli_order.brand_id = cli_order_convertion.brand_id
-                  AND cli_order.customer_id = cli_order_convertion.customer_id
-                  AND cli_order.order_date < min(
-                    cli_order_convertion.converted_at
-                  )
-              )
-            )
-          ) as return_days,
           cli_order_convertion.resource_name,
-          cli_store.name AS store_name,
-          date(cli_order.order_date) as order_date
+          cli_order.store_id
         from
           cli_order_convertion
           inner join cli_order on cli_order.brand_id = cli_order_convertion.brand_id
           and cli_order.customer_id = cli_order_convertion.customer_id
           and cli_order.id = cli_order_convertion.order_id
-          inner join cli_store_cache as cli_store on cli_store.brand_id = cli_order_convertion.brand_id
-          and cli_store.id = cli_order.store_id
-          left join cli_trigger_return on cli_trigger_return.brand_id = cli_order_convertion.brand_id
-          and cli_trigger_return.customer_id = cli_order_convertion.customer_id
-          and (
-            (
-              cli_trigger_return.trigger_id = cli_order_convertion.resource_id
-              AND cli_order_convertion.resource_name = 'cli_trigger'
-            )
-            OR (
-              cli_trigger_return.email_type_id = cli_order_convertion.resource_id
-              AND cli_order_convertion.resource_name = 'cli_email_type'
-            )
-          )
         where
-          cli_order_convertion.brand_id = '8'
-          and cli_order_convertion.store_id in (select id from cli_store where brand_id = '8' and cli_store.status_id in ('1','2','5','7'))
+          cli_order_convertion.brand_id = {{brand_id}}
           and cli_order_convertion.resource_name in ('cli_transaction')
-          and cli_order_convertion.converted_at >= '2025-06-01 00:00:00'
-          and cli_order_convertion.converted_at <= '2025-06-30 23:59:59'
-          and cli_order.total_amount > '0'
-          and cli_order_convertion.dropped = '0'
-          and CASE WHEN cli_order_convertion.resource_name = 'cli_telemarketing_registry' THEN EXISTS (
-            select
-              1
-            from
-              cli_telemarketing_registry
-            where
-              cli_telemarketing_registry.brand_id = '8'
-              and cli_telemarketing_registry.store_id in (select id from cli_store where brand_id = '8' and cli_store.status_id in ('1','2','5','7'))
-              and cli_telemarketing_registry.id = cli_order_convertion.resource_id
-              and cli_telemarketing_registry.store_id = cli_order.store_id
-            limit
-              1
-          ) WHEN cli_order_convertion.resource_name = 'cli_campaign' THEN EXISTS (
-            SELECT
-              1
-            FROM
-              cli_store_log_status
-            WHERE
-              cli_store_log_status.brand_id = cli_order_convertion.brand_id
-              AND cli_store_log_status.store_id = cli_order.store_id
-              AND cli_store_log_status.status_id in (1, 2, 5, 7)
-              AND EXTRACT(
-                YEAR_MONTH
-                FROM
-                  cli_store_log_status.created_at
-              ) >= EXTRACT(
-                YEAR_MONTH
-                FROM
-                  cli_order_convertion.converted_at
-              )
-            LIMIT
-              1
-          ) AND EXISTS (
-            SELECT
-              1
-            FROM
-              cli_campaign_store
-              JOIN cli_campaign ON cli_campaign.id = cli_campaign_store.campaign_id
-              AND cli_campaign.brand_id = cli_campaign_store.brand_id
-              AND cli_campaign.active = 1
-              AND cli_campaign.type_delivery in (1, 2, 6, 7)
-            WHERE
-              cli_campaign_store.brand_id = cli_order_convertion.brand_id
-              AND cli_campaign_store.campaign_id = cli_order_convertion.resource_id
-              AND IFNULL(
-                cli_campaign_store.store_id, cli_order.store_id
-              ) = cli_order.store_id
-              AND CASE WHEN cli_campaign.identity_id = 0 THEN 1 ELSE cli_campaign.identity_id = cli_store.identity_id END
-            LIMIT
-              1
-          ) WHEN cli_order_convertion.resource_name IN (
-            'cli_email_type', 'cli_trigger',
-            'cli_instagram_media_tracking'
-          ) THEN EXISTS (
-            SELECT
-              1
-            FROM
-              cli_store_log_status
-            WHERE
-              cli_store_log_status.brand_id = cli_order_convertion.brand_id
-              AND cli_store_log_status.store_id = cli_order.store_id
-              AND cli_store_log_status.status_id in (1, 2, 5, 7)
-              AND EXTRACT(
-                YEAR_MONTH
-                FROM
-                  cli_store_log_status.created_at
-              ) >= EXTRACT(
-                YEAR_MONTH
-                FROM
-                  cli_order_convertion.converted_at
-              )
-            LIMIT
-              1
-          ) WHEN cli_order_convertion.resource_name IN ('cli_transaction') THEN cli_order.store_id IN (
-            SELECT
-              id
-            FROM
-              cli_store_cache
-            WHERE
-              brand_id = '8'
-              AND status_id in (1, 2, 5, 7)
-          ) ELSE 1 END = 1
-          and exists (
-            select
-              1
-            from
-              cli_order
-            where
-              cli_order.brand_id = '8'
-              and cli_order.store_id in (select id from cli_store where brand_id = '8' and cli_store.status_id in ('1','2','5','7'))
-              and cli_order.id = cli_order_convertion.order_id
-            limit
-              1
-          )
-        group by
-          cli_order_convertion.order_id,
-          cli_order_convertion.customer_id
-        order by
-          order_date desc
+          and cli_order_convertion.converted_at >= '{{date_begin}} 00:00:00'
+          and cli_order_convertion.converted_at <= '{{date_until}} 23:59:59'
+          and cli_order.total_amount > 0
+          and cli_order_convertion.dropped = 0
       ) as q
       left join (
         select
           cli_transaction.order_id,
           cli_transaction.brand_id,
           sum(cli_transaction.amount) AS total
-        from
-          cli_transaction
-          left join cli_store_cache as cli_store on cli_store.brand_id = cli_transaction.brand_id
-          and cli_store.id = cli_transaction.store_id
+        from cli_transaction
         where
-          cli_transaction.brand_id = '8'
-          and cli_transaction.store_id in (select id from cli_store where brand_id = '8' and cli_store.status_id in ('1','2','5','7'))
-          and cli_transaction.transaction_date >= '2025-06-01 00:00:00'
-          and cli_transaction.transaction_date <= '2025-06-30 23:59:59'
+          cli_transaction.brand_id = {{brand_id}}
+          and cli_transaction.transaction_date >= '{{date_begin}} 00:00:00'
+          and cli_transaction.transaction_date <= '{{date_until}} 23:59:59'
           and cli_transaction.transaction_type_id in ('7')
           and cli_transaction.order_id is not null
-          and cli_transaction.order_id > '0'
-        group by
-          cli_transaction.brand_id,
-          cli_transaction.order_id
+          and cli_transaction.order_id > 0
+        group by cli_transaction.brand_id, cli_transaction.order_id
       ) as debits on debits.brand_id = q.brand_id
       and debits.order_id = q.order_id
-    group by
-      q.customer_id
-  ) as q2
-  inner join cli_brand on cli_brand.id = q2.brand_id
-  """
-
-QUERY_RFU_TOTAL = """
-select
-  SUM(
-    q2.total_consolidated - q2.debit_sum
-  ) as orders_sum
-from
-  (
-    select
-      q.return_days as return_days,
-      q.customer_id,
-      q.brand_id,
-      sum(q.total_amount) as total_consolidated,
-      SUM(
-        CASE WHEN q.resource_name IN ('cli_transaction') THEN IFNULL(debits.total, 0) ELSE 0 END
-      ) as debit_sum,
-      GROUP_CONCAT(DISTINCT store_name separator '|') AS store_names,
-      GROUP_CONCAT(DISTINCT order_date separator '|') AS order_date,
-      count(q.order_id) as orders_count,
-      q.store_id,
-      q.employee_id
-    from
-      (
-        select
-          cli_order_convertion.brand_id,
-          cli_order_convertion.store_id,
-          cli_order_convertion.order_id,
-          cli_order_convertion.customer_id,
-          cli_order.employee_id,
-          cli_order.total_amount,
-          DATE(
-            cli_order_convertion.converted_at
-          ) as converted_at,
-          (
-            DATEDIFF(
-              MIN(
-                cli_order_convertion.converted_at
-              ),
-              (
-                SELECT
-                  max(cli_order.order_date)
-                FROM
-                  cli_order
-                WHERE
-                  cli_order.brand_id = cli_order_convertion.brand_id
-                  AND cli_order.customer_id = cli_order_convertion.customer_id
-                  AND cli_order.order_date < min(
-                    cli_order_convertion.converted_at
-                  )
-              )
-            )
-          ) as return_days,
-          cli_order_convertion.resource_name,
-          cli_store.name AS store_name,
-          date(cli_order.order_date) as order_date
-        from
-          cli_order_convertion
-          inner join cli_order on cli_order.brand_id = cli_order_convertion.brand_id
-          and cli_order.customer_id = cli_order_convertion.customer_id
-          and cli_order.id = cli_order_convertion.order_id
-          inner join cli_store_cache as cli_store on cli_store.brand_id = cli_order_convertion.brand_id
-          and cli_store.id = cli_order.store_id
-          left join cli_trigger_return on cli_trigger_return.brand_id = cli_order_convertion.brand_id
-          and cli_trigger_return.customer_id = cli_order_convertion.customer_id
-          and (
-            (
-              cli_trigger_return.trigger_id = cli_order_convertion.resource_id
-              AND cli_order_convertion.resource_name = 'cli_trigger'
-            )
-            OR (
-              cli_trigger_return.email_type_id = cli_order_convertion.resource_id
-              AND cli_order_convertion.resource_name = 'cli_email_type'
-            )
-          )
-        where
-          cli_order_convertion.brand_id = '8'
-          and cli_order_convertion.store_id in (select id from cli_store where brand_id = '8' and cli_store.status_id in ('1','2','5','7'))
-          and cli_order_convertion.resource_name in (
-            'cli_campaign', 'cli_trigger', 'cli_email_type',
-            'cli_telemarketing_registry', 'cli_transaction'
-          )
-          and cli_order_convertion.converted_at >= '2025-06-01 00:00:00'
-          and cli_order_convertion.converted_at <= '2025-06-30 23:59:59'
-          and cli_order.total_amount > '0'
-          and cli_order_convertion.dropped = '0'
-          and CASE WHEN cli_order_convertion.resource_name = 'cli_telemarketing_registry' THEN EXISTS (
-            select
-              1
-            from
-              cli_telemarketing_registry
-            where
-              cli_telemarketing_registry.brand_id = '8'
-              and cli_telemarketing_registry.store_id in (select id from cli_store where brand_id = '8' and cli_store.status_id in ('1','2','5','7'))
-              and cli_telemarketing_registry.id = cli_order_convertion.resource_id
-              and cli_telemarketing_registry.store_id = cli_order.store_id
-            limit
-              1
-          ) WHEN cli_order_convertion.resource_name = 'cli_campaign' THEN EXISTS (
-            SELECT
-              1
-            FROM
-              cli_store_log_status
-            WHERE
-              cli_store_log_status.brand_id = cli_order_convertion.brand_id
-              AND cli_store_log_status.store_id = cli_order.store_id
-              AND cli_store_log_status.status_id in (1, 2, 5, 7)
-              AND EXTRACT(
-                YEAR_MONTH
-                FROM
-                  cli_store_log_status.created_at
-              ) >= EXTRACT(
-                YEAR_MONTH
-                FROM
-                  cli_order_convertion.converted_at
-              )
-            LIMIT
-              1
-          ) AND EXISTS (
-            SELECT
-              1
-            FROM
-              cli_campaign_store
-              JOIN cli_campaign ON cli_campaign.id = cli_campaign_store.campaign_id
-              AND cli_campaign.brand_id = cli_campaign_store.brand_id
-              AND cli_campaign.active = 1
-              AND cli_campaign.type_delivery in (1, 2, 6, 7)
-            WHERE
-              cli_campaign_store.brand_id = cli_order_convertion.brand_id
-              AND cli_campaign_store.campaign_id = cli_order_convertion.resource_id
-              AND IFNULL(
-                cli_campaign_store.store_id, cli_order.store_id
-              ) = cli_order.store_id
-              AND CASE WHEN cli_campaign.identity_id = 0 THEN 1 ELSE cli_campaign.identity_id = cli_store.identity_id END
-            LIMIT
-              1
-          ) WHEN cli_order_convertion.resource_name IN (
-            'cli_email_type', 'cli_trigger',
-            'cli_instagram_media_tracking'
-          ) THEN EXISTS (
-            SELECT
-              1
-            FROM
-              cli_store_log_status
-            WHERE
-              cli_store_log_status.brand_id = cli_order_convertion.brand_id
-              AND cli_store_log_status.store_id = cli_order.store_id
-              AND cli_store_log_status.status_id in (1, 2, 5, 7)
-              AND EXTRACT(
-                YEAR_MONTH
-                FROM
-                  cli_store_log_status.created_at
-              ) >= EXTRACT(
-                YEAR_MONTH
-                FROM
-                  cli_order_convertion.converted_at
-              )
-            LIMIT
-              1
-          ) WHEN cli_order_convertion.resource_name IN ('cli_transaction') THEN cli_order.store_id IN (
-            SELECT
-              id
-            FROM
-              cli_store_cache
-            WHERE
-              brand_id = '8'
-              AND status_id in (1, 2, 5, 7)
-          ) ELSE 1 END = 1
-          and exists (
-            select
-              1
-            from
-              cli_order
-            where
-              cli_order.brand_id = '8'
-              and cli_order.store_id in (select id from cli_store where brand_id = '8' and cli_store.status_id in ('1','2','5','7'))
-              and cli_order.id = cli_order_convertion.order_id
-            limit
-              1
-          )
-        group by
-          cli_order_convertion.order_id,
-          cli_order_convertion.customer_id
-        order by
-          order_date desc
-      ) as q
-      left join (
-        select
-          cli_transaction.order_id,
-          cli_transaction.brand_id,
-          sum(cli_transaction.amount) AS total
-        from
-          cli_transaction
-          left join cli_store_cache as cli_store on cli_store.brand_id = cli_transaction.brand_id
-          and cli_store.id = cli_transaction.store_id
-        where
-          cli_transaction.brand_id = '8'
-          and cli_transaction.store_id in (select id from cli_store where brand_id = '8' and cli_store.status_id in ('1','2','5','7'))
-          and cli_transaction.transaction_date >= '2025-06-01 00:00:00'
-          and cli_transaction.transaction_date <= '2025-06-30 23:59:59'
-          and cli_transaction.transaction_type_id in ('7')
-          and cli_transaction.order_id is not null
-          and cli_transaction.order_id > '0'
-        group by
-          cli_transaction.brand_id,
-          cli_transaction.order_id
-      ) as debits on debits.brand_id = q.brand_id
-      and debits.order_id = q.order_id
-    group by
-      q.customer_id
-  ) as q2
-  inner join cli_brand on cli_brand.id = q2.brand_id
-  """
+    group by q.customer_id
+  ) as q2;
+"""
 
 QUERY_RFU_TELEMARKETING = """
-  select
-  SUM(
-    q2.total_consolidated - q2.debit_sum
-  ) as orders_sum
+SELECT COALESCE(SUM(q2.total_consolidated - q2.debit_sum), 0)
 from
   (
     select
-      q.return_days as return_days,
       q.customer_id,
       q.brand_id,
       sum(q.total_amount) as total_consolidated,
       SUM(
         CASE WHEN q.resource_name IN ('cli_transaction') THEN IFNULL(debits.total, 0) ELSE 0 END
-      ) as debit_sum,
-      GROUP_CONCAT(DISTINCT store_name separator '|') AS store_names,
-      GROUP_CONCAT(DISTINCT order_date separator '|') AS order_date,
-      count(q.order_id) as orders_count,
-      q.store_id,
-      q.employee_id
+      ) as debit_sum
     from
       (
         select
@@ -796,208 +322,53 @@ from
           cli_order_convertion.store_id,
           cli_order_convertion.order_id,
           cli_order_convertion.customer_id,
-          cli_order.employee_id,
           cli_order.total_amount,
-          DATE(
-            cli_order_convertion.converted_at
-          ) as converted_at,
-          (
-            DATEDIFF(
-              MIN(
-                cli_order_convertion.converted_at
-              ),
-              (
-                SELECT
-                  max(cli_order.order_date)
-                FROM
-                  cli_order
-                WHERE
-                  cli_order.brand_id = cli_order_convertion.brand_id
-                  AND cli_order.customer_id = cli_order_convertion.customer_id
-                  AND cli_order.order_date < min(
-                    cli_order_convertion.converted_at
-                  )
-              )
-            )
-          ) as return_days,
           cli_order_convertion.resource_name,
-          cli_store.name AS store_name,
-          date(cli_order.order_date) as order_date
+          cli_order.store_id
         from
           cli_order_convertion
           inner join cli_order on cli_order.brand_id = cli_order_convertion.brand_id
           and cli_order.customer_id = cli_order_convertion.customer_id
           and cli_order.id = cli_order_convertion.order_id
-          inner join cli_store_cache as cli_store on cli_store.brand_id = cli_order_convertion.brand_id
-          and cli_store.id = cli_order.store_id
-          left join cli_trigger_return on cli_trigger_return.brand_id = cli_order_convertion.brand_id
-          and cli_trigger_return.customer_id = cli_order_convertion.customer_id
-          and (
-            (
-              cli_trigger_return.trigger_id = cli_order_convertion.resource_id
-              AND cli_order_convertion.resource_name = 'cli_trigger'
-            )
-            OR (
-              cli_trigger_return.email_type_id = cli_order_convertion.resource_id
-              AND cli_order_convertion.resource_name = 'cli_email_type'
-            )
-          )
         where
-          cli_order_convertion.brand_id = '8'
-          and cli_order_convertion.store_id in (select id from cli_store where brand_id = '8' and cli_store.status_id in ('1','2','5','7'))
+          cli_order_convertion.brand_id = {{brand_id}}
           and cli_order_convertion.resource_name in ('cli_telemarketing_registry')
-          and cli_order_convertion.converted_at >= '2025-06-01 00:00:00'
-          and cli_order_convertion.converted_at <= '2025-06-30 23:59:59'
-          and cli_order.total_amount > '0'
-          and cli_order_convertion.dropped = '0'
-          and CASE WHEN cli_order_convertion.resource_name = 'cli_telemarketing_registry' THEN EXISTS (
-            select
-              1
-            from
-              cli_telemarketing_registry
-            where
-              cli_telemarketing_registry.brand_id = '8'
-              and cli_telemarketing_registry.store_id in (select id from cli_store where brand_id = '8' and cli_store.status_id in ('1','2','5','7'))
-              and cli_telemarketing_registry.id = cli_order_convertion.resource_id
-              and cli_telemarketing_registry.store_id = cli_order.store_id
-            limit
-              1
-          ) WHEN cli_order_convertion.resource_name = 'cli_campaign' THEN EXISTS (
-            SELECT
-              1
-            FROM
-              cli_store_log_status
-            WHERE
-              cli_store_log_status.brand_id = cli_order_convertion.brand_id
-              AND cli_store_log_status.store_id = cli_order.store_id
-              AND cli_store_log_status.status_id in (1, 2, 5, 7)
-              AND EXTRACT(
-                YEAR_MONTH
-                FROM
-                  cli_store_log_status.created_at
-              ) >= EXTRACT(
-                YEAR_MONTH
-                FROM
-                  cli_order_convertion.converted_at
-              )
-            LIMIT
-              1
-          ) AND EXISTS (
-            SELECT
-              1
-            FROM
-              cli_campaign_store
-              JOIN cli_campaign ON cli_campaign.id = cli_campaign_store.campaign_id
-              AND cli_campaign.brand_id = cli_campaign_store.brand_id
-              AND cli_campaign.active = 1
-              AND cli_campaign.type_delivery in (1, 2, 6, 7)
-            WHERE
-              cli_campaign_store.brand_id = cli_order_convertion.brand_id
-              AND cli_campaign_store.campaign_id = cli_order_convertion.resource_id
-              AND IFNULL(
-                cli_campaign_store.store_id, cli_order.store_id
-              ) = cli_order.store_id
-              AND CASE WHEN cli_campaign.identity_id = 0 THEN 1 ELSE cli_campaign.identity_id = cli_store.identity_id END
-            LIMIT
-              1
-          ) WHEN cli_order_convertion.resource_name IN (
-            'cli_email_type', 'cli_trigger',
-            'cli_instagram_media_tracking'
-          ) THEN EXISTS (
-            SELECT
-              1
-            FROM
-              cli_store_log_status
-            WHERE
-              cli_store_log_status.brand_id = cli_order_convertion.brand_id
-              AND cli_store_log_status.store_id = cli_order.store_id
-              AND cli_store_log_status.status_id in (1, 2, 5, 7)
-              AND EXTRACT(
-                YEAR_MONTH
-                FROM
-                  cli_store_log_status.created_at
-              ) >= EXTRACT(
-                YEAR_MONTH
-                FROM
-                  cli_order_convertion.converted_at
-              )
-            LIMIT
-              1
-          ) WHEN cli_order_convertion.resource_name IN ('cli_transaction') THEN cli_order.store_id IN (
-            SELECT
-              id
-            FROM
-              cli_store_cache
-            WHERE
-              brand_id = '8'
-              AND status_id in (1, 2, 5, 7)
-          ) ELSE 1 END = 1
-          and exists (
-            select
-              1
-            from
-              cli_order
-            where
-              cli_order.brand_id = '8'
-              and cli_order.store_id in (select id from cli_store where brand_id = '8' and cli_store.status_id in ('1','2','5','7'))
-              and cli_order.id = cli_order_convertion.order_id
-            limit
-              1
-          )
-        group by
-          cli_order_convertion.order_id,
-          cli_order_convertion.customer_id
-        order by
-          order_date desc
+          and cli_order_convertion.converted_at >= '{{date_begin}} 00:00:00'
+          and cli_order_convertion.converted_at <= '{{date_until}} 23:59:59'
+          and cli_order.total_amount > 0
+          and cli_order_convertion.dropped = 0
       ) as q
       left join (
         select
           cli_transaction.order_id,
           cli_transaction.brand_id,
           sum(cli_transaction.amount) AS total
-        from
-          cli_transaction
-          left join cli_store_cache as cli_store on cli_store.brand_id = cli_transaction.brand_id
-          and cli_store.id = cli_transaction.store_id
+        from cli_transaction
         where
-          cli_transaction.brand_id = '8'
-          and cli_transaction.store_id in (select id from cli_store where brand_id = '8' and cli_store.status_id in ('1','2','5','7'))
-          and cli_transaction.transaction_date >= '2025-06-01 00:00:00'
-          and cli_transaction.transaction_date <= '2025-06-30 23:59:59'
+          cli_transaction.brand_id = {{brand_id}}
+          and cli_transaction.transaction_date >= '{{date_begin}} 00:00:00'
+          and cli_transaction.transaction_date <= '{{date_until}} 23:59:59'
           and cli_transaction.transaction_type_id in ('7')
           and cli_transaction.order_id is not null
-          and cli_transaction.order_id > '0'
-        group by
-          cli_transaction.brand_id,
-          cli_transaction.order_id
+          and cli_transaction.order_id > 0
+        group by cli_transaction.brand_id, cli_transaction.order_id
       ) as debits on debits.brand_id = q.brand_id
       and debits.order_id = q.order_id
-    group by
-      q.customer_id
-  ) as q2
-  inner join cli_brand on cli_brand.id = q2.brand_id
-  """
+    group by q.customer_id
+  ) as q2;
+"""
 
-QUERY_RFU_GATILHOS = """
-select
-  SUM(
-    q2.total_consolidated - q2.debit_sum
-  ) as orders_sum
+QUERY_RFU_TOTAL = """
+SELECT COALESCE(SUM(q2.total_consolidated - q2.debit_sum), 0)
 from
   (
     select
-      q.return_days as return_days,
       q.customer_id,
       q.brand_id,
       sum(q.total_amount) as total_consolidated,
       SUM(
         CASE WHEN q.resource_name IN ('cli_transaction') THEN IFNULL(debits.total, 0) ELSE 0 END
-      ) as debit_sum,
-      GROUP_CONCAT(DISTINCT store_name separator '|') AS store_names,
-      GROUP_CONCAT(DISTINCT order_date separator '|') AS order_date,
-      count(q.order_id) as orders_count,
-      q.store_id,
-      q.employee_id
+      ) as debit_sum
     from
       (
         select
@@ -1005,261 +376,96 @@ from
           cli_order_convertion.store_id,
           cli_order_convertion.order_id,
           cli_order_convertion.customer_id,
-          cli_order.employee_id,
           cli_order.total_amount,
-          DATE(
-            cli_order_convertion.converted_at
-          ) as converted_at,
-          (
-            DATEDIFF(
-              MIN(
-                cli_order_convertion.converted_at
-              ),
-              (
-                SELECT
-                  max(cli_order.order_date)
-                FROM
-                  cli_order
-                WHERE
-                  cli_order.brand_id = cli_order_convertion.brand_id
-                  AND cli_order.customer_id = cli_order_convertion.customer_id
-                  AND cli_order.order_date < min(
-                    cli_order_convertion.converted_at
-                  )
-              )
-            )
-          ) as return_days,
           cli_order_convertion.resource_name,
-          cli_store.name AS store_name,
-          date(cli_order.order_date) as order_date
+          cli_order.store_id
         from
           cli_order_convertion
           inner join cli_order on cli_order.brand_id = cli_order_convertion.brand_id
           and cli_order.customer_id = cli_order_convertion.customer_id
           and cli_order.id = cli_order_convertion.order_id
-          inner join cli_store_cache as cli_store on cli_store.brand_id = cli_order_convertion.brand_id
-          and cli_store.id = cli_order.store_id
-          left join cli_trigger_return on cli_trigger_return.brand_id = cli_order_convertion.brand_id
-          and cli_trigger_return.customer_id = cli_order_convertion.customer_id
-          and (
-            (
-              cli_trigger_return.trigger_id = cli_order_convertion.resource_id
-              AND cli_order_convertion.resource_name = 'cli_trigger'
-            )
-            OR (
-              cli_trigger_return.email_type_id = cli_order_convertion.resource_id
-              AND cli_order_convertion.resource_name = 'cli_email_type'
-            )
-          )
         where
-          cli_order_convertion.brand_id = '8'
-          and cli_order_convertion.store_id in (select id from cli_store where brand_id = '8' and cli_store.status_id in ('1','2','5','7'))
-          and cli_order_convertion.resource_name in ('cli_email_type', 'cli_trigger')
-          and cli_order_convertion.converted_at >= '2025-06-01 00:00:00'
-          and cli_order_convertion.converted_at <= '2025-06-30 23:59:59'
-          and cli_order.total_amount > '0'
-          and cli_order_convertion.dropped = '0'
-          and CASE WHEN cli_order_convertion.resource_name = 'cli_telemarketing_registry' THEN EXISTS (
-            select
-              1
-            from
-              cli_telemarketing_registry
-            where
-              cli_telemarketing_registry.brand_id = '8'
-              and cli_telemarketing_registry.store_id in (select id from cli_store where brand_id = '8' and cli_store.status_id in ('1','2','5','7'))
-              and cli_telemarketing_registry.id = cli_order_convertion.resource_id
-              and cli_telemarketing_registry.store_id = cli_order.store_id
-            limit
-              1
-          ) WHEN cli_order_convertion.resource_name = 'cli_campaign' THEN EXISTS (
-            SELECT
-              1
-            FROM
-              cli_store_log_status
-            WHERE
-              cli_store_log_status.brand_id = cli_order_convertion.brand_id
-              AND cli_store_log_status.store_id = cli_order.store_id
-              AND cli_store_log_status.status_id in (1, 2, 5, 7)
-              AND EXTRACT(
-                YEAR_MONTH
-                FROM
-                  cli_store_log_status.created_at
-              ) >= EXTRACT(
-                YEAR_MONTH
-                FROM
-                  cli_order_convertion.converted_at
-              )
-            LIMIT
-              1
-          ) AND EXISTS (
-            SELECT
-              1
-            FROM
-              cli_campaign_store
-              JOIN cli_campaign ON cli_campaign.id = cli_campaign_store.campaign_id
-              AND cli_campaign.brand_id = cli_campaign_store.brand_id
-              AND cli_campaign.active = 1
-              AND cli_campaign.type_delivery in (1, 2, 6, 7)
-            WHERE
-              cli_campaign_store.brand_id = cli_order_convertion.brand_id
-              AND cli_campaign_store.campaign_id = cli_order_convertion.resource_id
-              AND IFNULL(
-                cli_campaign_store.store_id, cli_order.store_id
-              ) = cli_order.store_id
-              AND CASE WHEN cli_campaign.identity_id = 0 THEN 1 ELSE cli_campaign.identity_id = cli_store.identity_id END
-            LIMIT
-              1
-          ) WHEN cli_order_convertion.resource_name IN (
-            'cli_email_type', 'cli_trigger',
-            'cli_instagram_media_tracking'
-          ) THEN EXISTS (
-            SELECT
-              1
-            FROM
-              cli_store_log_status
-            WHERE
-              cli_store_log_status.brand_id = cli_order_convertion.brand_id
-              AND cli_store_log_status.store_id = cli_order.store_id
-              AND cli_store_log_status.status_id in (1, 2, 5, 7)
-              AND EXTRACT(
-                YEAR_MONTH
-                FROM
-                  cli_store_log_status.created_at
-              ) >= EXTRACT(
-                YEAR_MONTH
-                FROM
-                  cli_order_convertion.converted_at
-              )
-            LIMIT
-              1
-          ) WHEN cli_order_convertion.resource_name IN ('cli_transaction') THEN cli_order.store_id IN (
-            SELECT
-              id
-            FROM
-              cli_store_cache
-            WHERE
-              brand_id = '8'
-              AND status_id in (1, 2, 5, 7)
-          ) ELSE 1 END = 1
-          and exists (
-            select
-              1
-            from
-              cli_order
-            where
-              cli_order.brand_id = '8'
-              and cli_order.store_id in (select id from cli_store where brand_id = '8' and cli_store.status_id in ('1','2','5','7'))
-              and cli_order.id = cli_order_convertion.order_id
-            limit
-              1
-          )
-        group by
-          cli_order_convertion.order_id,
-          cli_order_convertion.customer_id
-        order by
-          order_date desc
+          cli_order_convertion.brand_id = {{brand_id}}
+          and cli_order_convertion.resource_name in ('cli_campaign', 'cli_trigger', 'cli_email_type', 'cli_telemarketing_registry', 'cli_transaction')
+          and cli_order_convertion.converted_at >= '{{date_begin}} 00:00:00'
+          and cli_order_convertion.converted_at <= '{{date_until}} 23:59:59'
+          and cli_order.total_amount > 0
+          and cli_order_convertion.dropped = 0
       ) as q
       left join (
         select
           cli_transaction.order_id,
           cli_transaction.brand_id,
           sum(cli_transaction.amount) AS total
-        from
-          cli_transaction
-          left join cli_store_cache as cli_store on cli_store.brand_id = cli_transaction.brand_id
-          and cli_store.id = cli_transaction.store_id
+        from cli_transaction
         where
-          cli_transaction.brand_id = '8'
-          and cli_transaction.store_id in (select id from cli_store where brand_id = '8' and cli_store.status_id in ('1','2','5','7'))
-          and cli_transaction.transaction_date >= '2025-06-01 00:00:00'
-          and cli_transaction.transaction_date <= '2025-06-30 23:59:59'
+          cli_transaction.brand_id = {{brand_id}}
+          and cli_transaction.transaction_date >= '{{date_begin}} 00:00:00'
+          and cli_transaction.transaction_date <= '{{date_until}} 23:59:59'
           and cli_transaction.transaction_type_id in ('7')
           and cli_transaction.order_id is not null
-          and cli_transaction.order_id > '0'
-        group by
-          cli_transaction.brand_id,
-          cli_transaction.order_id
+          and cli_transaction.order_id > 0
+        group by cli_transaction.brand_id, cli_transaction.order_id
       ) as debits on debits.brand_id = q.brand_id
       and debits.order_id = q.order_id
-    group by
-      q.customer_id
-  ) as q2
-  inner join cli_brand on cli_brand.id = q2.brand_id
-  """
+    group by q.customer_id
+  ) as q2;
+"""
 
+# === EXECUTAR QUERIES E CONSTRUIR RESULTADOS ===
 all_query_results = []
 
-print("Executando: Quantidade de Campanhas Criadas...")
-headers1, data1 = execute_query(QUERY_CAMPANHAS_CRIADAS, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
-all_query_results.append({
-    'name': 'QUANTIDADE DE CAMPANHAS CRIADAS NO PERÍODO',
-    'headers': headers1,
-    'data': data1
-})
+print("Executando: Campanhas Criadas (Email)...")
+headers, data = execute_query(QUERY_CAMPANHAS_EMAIL, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
+all_query_results.append({'name': 'campanhas_criadas_email', 'headers': headers, 'data': data})
 
-print("Executando: Base Impactada por Canal...")
-headers2, data2 = execute_query(QUERY_BASE_IMPACTADA, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
-all_query_results.append({
-    'name': 'BASE IMPACTADA POR CANAL NO PERÍODO',
-    'headers': headers2,
-    'data': data2
-})
+print("Executando: Campanhas Criadas (SMS)...")
+headers, data = execute_query(QUERY_CAMPANHAS_SMS, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
+all_query_results.append({'name': 'campanhas_criadas_sms', 'headers': headers, 'data': data})
 
-print("Executando: Número de Lojas...")
-headers3, data3 = execute_query(QUERY_NUMERO_DE_LOJAS, {'brand_id': BRAND_ID})
-all_query_results.append({
-    'name': 'NÚMERO DE LOJAS',
-    'headers': headers3,
-    'data': data3
-})
+print("Executando: Campanhas Criadas (Agenda)...")
+headers, data = execute_query(QUERY_CAMPANHAS_AGENDA, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
+all_query_results.append({'name': 'campanhas_criadas_agenda', 'headers': headers, 'data': data})
 
-print("Executando: Número de Lojas Inadimplentes...")
-headers4, data4 = execute_query(QUERY_NUMERO_DE_LOJAS_INADIMPLENTES, {'brand_id': BRAND_ID})
-all_query_results.append({
-    'name': 'NÚMERO DE LOJAS INADIMPLENTES',
-    'headers': headers4,
-    'data': data4 
-})
+print("Executando: Base Impactada (Email)...")
+headers, data = execute_query(QUERY_BASE_IMPACTADA_EMAIL, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
+all_query_results.append({'name': 'base_impactada_email', 'headers': headers, 'data': data})
 
-print("Executando: RFU Campanhas...")
-headers5, data5 = execute_query(QUERY_RFU_CAMPANHAS, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
-all_query_results.append({
-    'name': 'RFU CAMPANHAS',
-    'headers': headers5,
-    'data': data5
-})
+print("Executando: Base Impactada (SMS)...")
+headers, data = execute_query(QUERY_BASE_IMPACTADA_SMS, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
+all_query_results.append({'name': 'base_impactada_sms', 'headers': headers, 'data': data})
 
-print("Executando: RFU Cashback...")
-headers6, data6 = execute_query(QUERY_RFU_CASHBACK, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL}) 
-all_query_results.append({
-    'name': 'RFU CASHBACK',
-    'headers': headers6,
-    'data': data6
-})  
+print("Executando: Base Impactada (Agenda)...")
+headers, data = execute_query(QUERY_BASE_IMPACTADA_AGENDA, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
+all_query_results.append({'name': 'base_impactada_agenda', 'headers': headers, 'data': data})
 
-print("Executando: RFU Total...")
-headers7, data7 = execute_query(QUERY_RFU_TOTAL, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
-all_query_results.append({
-    'name': 'RFU TOTAL',
-    'headers': headers7,
-    'data': data7
-})
+print("Executando: Lojas Ativas...")
+headers, data = execute_query(QUERY_LOJAS_ATIVAS, {'brand_id': BRAND_ID})
+all_query_results.append({'name': 'lojas_ativas', 'headers': headers, 'data': data})
 
-print("Executando: RFU Telemarketing...")
-headers8, data8 = execute_query(QUERY_RFU_TELEMARKETING, {'brand  _id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
-all_query_results.append({
-    'name': 'RFU TELEMARKETING',
-    'headers': headers8,
-    'data': data8
-})
+print("Executando: Lojas Onboarding...")
+headers, data = execute_query(QUERY_LOJAS_ONBOARDING, {'brand_id': BRAND_ID})
+all_query_results.append({'name': 'lojas_onboarding', 'headers': headers, 'data': data})
 
-print("Executando: RFU Gatilhos...")
-headers9, data9 = execute_query(QUERY_RFU_GATILHOS, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
-all_query_results.append({
-    'name': 'RFU GATILHOS',
-    'headers': headers9,
-    'data': data9
-})
+print("Executando: Retorno Gatilhos...")
+headers, data = execute_query(QUERY_RFU_GATILHOS, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
+all_query_results.append({'name': 'retorno_gatilhos', 'headers': headers, 'data': data})
+
+print("Executando: Retorno Campanhas...")
+headers, data = execute_query(QUERY_RFU_CAMPANHAS, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
+all_query_results.append({'name': 'retorno_campanhas', 'headers': headers, 'data': data})
+
+print("Executando: Retorno Cashback...")
+headers, data = execute_query(QUERY_RFU_CASHBACK, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
+all_query_results.append({'name': 'retorno_cashback', 'headers': headers, 'data': data})
+
+print("Executando: Retorno Telemarketing...")
+headers, data = execute_query(QUERY_RFU_TELEMARKETING, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
+all_query_results.append({'name': 'retorno_telemarketing', 'headers': headers, 'data': data})
+
+print("Executando: Retorno Total...")
+headers, data = execute_query(QUERY_RFU_TOTAL, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
+all_query_results.append({'name': 'retorno_total', 'headers': headers, 'data': data})
 
 OUTPUT_CSV_FILE = 'relatorio_consolidado_mysql.csv'
 export_queries_to_single_csv(OUTPUT_CSV_FILE, all_query_results)
