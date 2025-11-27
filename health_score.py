@@ -11,9 +11,12 @@ DB_CONFIG = {
 }
 
 # --- PARÂMETROS PARA AS CONSULTAS (MODIFICADO PARA INPUT) ---
-BRAND_ID = input("Digite o BRAND_ID: ")
+BRAND_IDS_INPUT = input("Digite os BRAND_IDs (separados por vírgula, ex: 8, 9, 10): ")
 DATE_BEGIN = input("Digite a data de início (formato YYYY-MM-DD): ")
 DATE_UNTIL = input("Digite a data de término (formato YYYY-MM-DD): ")
+
+# Processar e limpar os brand_ids
+BRAND_IDS = [bid.strip() for bid in BRAND_IDS_INPUT.split(',')]
 
 def execute_query(query, params):
     """
@@ -27,28 +30,21 @@ def execute_query(query, params):
         if conn.is_connected():
             cursor = conn.cursor()
 
-            sql_params = {}
-            sql_query_adapted = query
-            
-            if '{{brand_id}}' in sql_query_adapted:
-                sql_query_adapted = sql_query_adapted.replace('{{brand_id}}', '%s')
-                sql_params['brand_id'] = params.get('brand_id')
-
-            if '{{date_begin}}' in sql_query_adapted and '{{date_until}}' in sql_query_adapted:
-                sql_query_adapted = sql_query_adapted.replace("'{{date_begin}}'", '%s')
-                sql_query_adapted = sql_query_adapted.replace("'{{date_until}}'", '%s')
-                sql_params['date_begin'] = params.get('date_begin')
-                sql_params['date_until'] = params.get('date_until')
-
             ordered_params = []
-            if 'brand_id' in sql_params:
-                ordered_params.append(sql_params['brand_id'])
-            if 'date_begin' in sql_params:
-                ordered_params.append(sql_params['date_begin'])
-            if 'date_until' in sql_params:
-                ordered_params.append(sql_params['date_until'])
+            
+            # Contar quantos placeholders há na query
+            num_placeholders = query.count('%s')
+            
+            # Construir lista de parâmetros repetindo conforme necessário
+            for _ in range(num_placeholders):
+                if 'brand_id' in params and len(ordered_params) % 3 == 0:
+                    ordered_params.append(params['brand_id'])
+                elif 'date_begin' in params and len(ordered_params) % 3 == 1:
+                    ordered_params.append(params['date_begin'])
+                elif 'date_until' in params and len(ordered_params) % 3 == 2:
+                    ordered_params.append(params['date_until'])
 
-            cursor.execute(sql_query_adapted, tuple(ordered_params))
+            cursor.execute(query, tuple(ordered_params))
 
             headers = [desc[0] for desc in cursor.description]
             data = cursor.fetchall() 
@@ -67,20 +63,21 @@ def execute_query(query, params):
         if conn and conn.is_connected():
             conn.close()
 
-def export_queries_to_single_csv(file_name, queries_data):
+def export_queries_to_single_csv(file_name, queries_data_list):
     """
-    Exporta dados de múltiplas consultas lado a lado como colunas em um único arquivo CSV.
+    Exporta dados de múltiplas marcas lado a lado como colunas em um único arquivo CSV.
+    queries_data_list é uma lista de listas, onde cada lista contém os resultados de uma marca.
     """
     with open(file_name, 'w', newline='', encoding='utf-8') as csv_file:
         writer = csv.writer(csv_file, delimiter=';')
 
-        # Escrever cabeçalhos (nomes das colunas)
-        headers = [q['name'] for q in queries_data]
+        # Escrever cabeçalhos (brand_id + nomes das colunas)
+        headers = ['brand_id'] + [q['name'] for q in queries_data_list[0]]
         writer.writerow(headers)
         
-        # Escrever dados linha por linha, lado a lado
-        for row_idx in range(1):  # Apenas uma linha de dados por coluna
-            row_data = []
+        # Escrever dados linha por linha (uma linha por marca)
+        for brand_idx, queries_data in enumerate(queries_data_list):
+            row_data = [BRAND_IDS[brand_idx]]  # Adicionar brand_id como primeira coluna
             for query_result in queries_data:
                 if query_result['data']:
                     # Pega o primeiro valor da tupla
@@ -94,51 +91,51 @@ def export_queries_to_single_csv(file_name, queries_data):
 QUERY_CAMPANHAS_EMAIL = """
 SELECT COUNT(*) 
 FROM cli_campaign
-WHERE brand_id = {{brand_id}} AND type_delivery = 1 AND created_at BETWEEN '{{date_begin}}' AND '{{date_until}}';
+WHERE brand_id = %s AND type_delivery = 1 AND created_at BETWEEN %s AND %s;
 """
 
 QUERY_CAMPANHAS_SMS = """
 SELECT COUNT(*) 
 FROM cli_campaign
-WHERE brand_id = {{brand_id}} AND type_delivery = 2 AND created_at BETWEEN '{{date_begin}}' AND '{{date_until}}';
+WHERE brand_id = %s AND type_delivery = 2 AND created_at BETWEEN %s AND %s;
 """
 
 QUERY_CAMPANHAS_AGENDA = """
 SELECT COUNT(*) 
 FROM cli_campaign
-WHERE brand_id = {{brand_id}} AND type_delivery = 5 AND created_at BETWEEN '{{date_begin}}' AND '{{date_until}}';
+WHERE brand_id = %s AND type_delivery = 5 AND created_at BETWEEN %s AND %s;
 """
 
 # === QUERIES PARA BASE IMPACTADA ===
 QUERY_BASE_IMPACTADA_EMAIL = """
 SELECT COUNT(DISTINCT customer_id) 
 FROM cli_campaign_return
-WHERE brand_id = {{brand_id}} AND delivery_type = 1 AND delivered_at BETWEEN '{{date_begin}}' AND '{{date_until}}';
+WHERE brand_id = %s AND delivery_type = 1 AND delivered_at BETWEEN %s AND %s;
 """
 
 QUERY_BASE_IMPACTADA_SMS = """
 SELECT COUNT(DISTINCT customer_id) 
 FROM cli_campaign_return
-WHERE brand_id = {{brand_id}} AND delivery_type = 2 AND delivered_at BETWEEN '{{date_begin}}' AND '{{date_until}}';
+WHERE brand_id = %s AND delivery_type = 2 AND delivered_at BETWEEN %s AND %s;
 """
 
 QUERY_BASE_IMPACTADA_AGENDA = """
 SELECT COUNT(DISTINCT customer_id) 
 FROM cli_campaign_return
-WHERE brand_id = {{brand_id}} AND delivery_type = 5 AND delivered_at BETWEEN '{{date_begin}}' AND '{{date_until}}';
+WHERE brand_id = %s AND delivery_type = 5 AND delivered_at BETWEEN %s AND %s;
 """
 
 # === QUERIES PARA LOJAS ===
 QUERY_LOJAS_ATIVAS = """
 SELECT COUNT(*) 
 FROM cli_store
-WHERE brand_id = {{brand_id}} AND status_id = 1;
+WHERE brand_id = %s AND status_id = 1;
 """
 
 QUERY_LOJAS_ONBOARDING = """
 SELECT COUNT(*) 
 FROM cli_store
-WHERE brand_id = {{brand_id}} AND status_id = 7;
+WHERE brand_id = %s AND status_id = 7;
 """
 
 # === QUERIES PARA RETORNO (RFU) ===
@@ -161,18 +158,17 @@ from
           cli_order_convertion.order_id,
           cli_order_convertion.customer_id,
           cli_order.total_amount,
-          cli_order_convertion.resource_name,
-          cli_order.store_id
+          cli_order_convertion.resource_name
         from
           cli_order_convertion
           inner join cli_order on cli_order.brand_id = cli_order_convertion.brand_id
           and cli_order.customer_id = cli_order_convertion.customer_id
           and cli_order.id = cli_order_convertion.order_id
         where
-          cli_order_convertion.brand_id = {{brand_id}}
+          cli_order_convertion.brand_id = %s
           and cli_order_convertion.resource_name in ('cli_email_type', 'cli_trigger')
-          and cli_order_convertion.converted_at >= '{{date_begin}} 00:00:00'
-          and cli_order_convertion.converted_at <= '{{date_until}} 23:59:59'
+          and cli_order_convertion.converted_at >= %s
+          and cli_order_convertion.converted_at <= %s
           and cli_order.total_amount > 0
           and cli_order_convertion.dropped = 0
       ) as q
@@ -183,9 +179,9 @@ from
           sum(cli_transaction.amount) AS total
         from cli_transaction
         where
-          cli_transaction.brand_id = {{brand_id}}
-          and cli_transaction.transaction_date >= '{{date_begin}} 00:00:00'
-          and cli_transaction.transaction_date <= '{{date_until}} 23:59:59'
+          cli_transaction.brand_id = %s
+          and cli_transaction.transaction_date >= %s
+          and cli_transaction.transaction_date <= %s
           and cli_transaction.transaction_type_id in ('7')
           and cli_transaction.order_id is not null
           and cli_transaction.order_id > 0
@@ -215,18 +211,17 @@ from
           cli_order_convertion.order_id,
           cli_order_convertion.customer_id,
           cli_order.total_amount,
-          cli_order_convertion.resource_name,
-          cli_order.store_id
+          cli_order_convertion.resource_name
         from
           cli_order_convertion
           inner join cli_order on cli_order.brand_id = cli_order_convertion.brand_id
           and cli_order.customer_id = cli_order_convertion.customer_id
           and cli_order.id = cli_order_convertion.order_id
         where
-          cli_order_convertion.brand_id = {{brand_id}}
+          cli_order_convertion.brand_id = %s
           and cli_order_convertion.resource_name in ('cli_campaign')
-          and cli_order_convertion.converted_at >= '{{date_begin}} 00:00:00'
-          and cli_order_convertion.converted_at <= '{{date_until}} 23:59:59'
+          and cli_order_convertion.converted_at >= %s
+          and cli_order_convertion.converted_at <= %s
           and cli_order.total_amount > 0
           and cli_order_convertion.dropped = 0
       ) as q
@@ -237,9 +232,9 @@ from
           sum(cli_transaction.amount) AS total
         from cli_transaction
         where
-          cli_transaction.brand_id = {{brand_id}}
-          and cli_transaction.transaction_date >= '{{date_begin}} 00:00:00'
-          and cli_transaction.transaction_date <= '{{date_until}} 23:59:59'
+          cli_transaction.brand_id = %s
+          and cli_transaction.transaction_date >= %s
+          and cli_transaction.transaction_date <= %s
           and cli_transaction.transaction_type_id in ('7')
           and cli_transaction.order_id is not null
           and cli_transaction.order_id > 0
@@ -269,18 +264,17 @@ from
           cli_order_convertion.order_id,
           cli_order_convertion.customer_id,
           cli_order.total_amount,
-          cli_order_convertion.resource_name,
-          cli_order.store_id
+          cli_order_convertion.resource_name
         from
           cli_order_convertion
           inner join cli_order on cli_order.brand_id = cli_order_convertion.brand_id
           and cli_order.customer_id = cli_order_convertion.customer_id
           and cli_order.id = cli_order_convertion.order_id
         where
-          cli_order_convertion.brand_id = {{brand_id}}
+          cli_order_convertion.brand_id = %s
           and cli_order_convertion.resource_name in ('cli_transaction')
-          and cli_order_convertion.converted_at >= '{{date_begin}} 00:00:00'
-          and cli_order_convertion.converted_at <= '{{date_until}} 23:59:59'
+          and cli_order_convertion.converted_at >= %s
+          and cli_order_convertion.converted_at <= %s
           and cli_order.total_amount > 0
           and cli_order_convertion.dropped = 0
       ) as q
@@ -291,9 +285,9 @@ from
           sum(cli_transaction.amount) AS total
         from cli_transaction
         where
-          cli_transaction.brand_id = {{brand_id}}
-          and cli_transaction.transaction_date >= '{{date_begin}} 00:00:00'
-          and cli_transaction.transaction_date <= '{{date_until}} 23:59:59'
+          cli_transaction.brand_id = %s
+          and cli_transaction.transaction_date >= %s
+          and cli_transaction.transaction_date <= %s
           and cli_transaction.transaction_type_id in ('7')
           and cli_transaction.order_id is not null
           and cli_transaction.order_id > 0
@@ -323,18 +317,17 @@ from
           cli_order_convertion.order_id,
           cli_order_convertion.customer_id,
           cli_order.total_amount,
-          cli_order_convertion.resource_name,
-          cli_order.store_id
+          cli_order_convertion.resource_name
         from
           cli_order_convertion
           inner join cli_order on cli_order.brand_id = cli_order_convertion.brand_id
           and cli_order.customer_id = cli_order_convertion.customer_id
           and cli_order.id = cli_order_convertion.order_id
         where
-          cli_order_convertion.brand_id = {{brand_id}}
+          cli_order_convertion.brand_id = %s
           and cli_order_convertion.resource_name in ('cli_telemarketing_registry')
-          and cli_order_convertion.converted_at >= '{{date_begin}} 00:00:00'
-          and cli_order_convertion.converted_at <= '{{date_until}} 23:59:59'
+          and cli_order_convertion.converted_at >= %s
+          and cli_order_convertion.converted_at <= %s
           and cli_order.total_amount > 0
           and cli_order_convertion.dropped = 0
       ) as q
@@ -345,9 +338,9 @@ from
           sum(cli_transaction.amount) AS total
         from cli_transaction
         where
-          cli_transaction.brand_id = {{brand_id}}
-          and cli_transaction.transaction_date >= '{{date_begin}} 00:00:00'
-          and cli_transaction.transaction_date <= '{{date_until}} 23:59:59'
+          cli_transaction.brand_id = %s
+          and cli_transaction.transaction_date >= %s
+          and cli_transaction.transaction_date <= %s
           and cli_transaction.transaction_type_id in ('7')
           and cli_transaction.order_id is not null
           and cli_transaction.order_id > 0
@@ -377,18 +370,17 @@ from
           cli_order_convertion.order_id,
           cli_order_convertion.customer_id,
           cli_order.total_amount,
-          cli_order_convertion.resource_name,
-          cli_order.store_id
+          cli_order_convertion.resource_name
         from
           cli_order_convertion
           inner join cli_order on cli_order.brand_id = cli_order_convertion.brand_id
           and cli_order.customer_id = cli_order_convertion.customer_id
           and cli_order.id = cli_order_convertion.order_id
         where
-          cli_order_convertion.brand_id = {{brand_id}}
+          cli_order_convertion.brand_id = %s
           and cli_order_convertion.resource_name in ('cli_campaign', 'cli_trigger', 'cli_email_type', 'cli_telemarketing_registry', 'cli_transaction')
-          and cli_order_convertion.converted_at >= '{{date_begin}} 00:00:00'
-          and cli_order_convertion.converted_at <= '{{date_until}} 23:59:59'
+          and cli_order_convertion.converted_at >= %s
+          and cli_order_convertion.converted_at <= %s
           and cli_order.total_amount > 0
           and cli_order_convertion.dropped = 0
       ) as q
@@ -399,9 +391,9 @@ from
           sum(cli_transaction.amount) AS total
         from cli_transaction
         where
-          cli_transaction.brand_id = {{brand_id}}
-          and cli_transaction.transaction_date >= '{{date_begin}} 00:00:00'
-          and cli_transaction.transaction_date <= '{{date_until}} 23:59:59'
+          cli_transaction.brand_id = %s
+          and cli_transaction.transaction_date >= %s
+          and cli_transaction.transaction_date <= %s
           and cli_transaction.transaction_type_id in ('7')
           and cli_transaction.order_id is not null
           and cli_transaction.order_id > 0
@@ -413,60 +405,66 @@ from
 """
 
 # === EXECUTAR QUERIES E CONSTRUIR RESULTADOS ===
-all_query_results = []
+all_brands_results = []
 
-print("Executando: Campanhas Criadas (Email)...")
-headers, data = execute_query(QUERY_CAMPANHAS_EMAIL, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
-all_query_results.append({'name': 'campanhas_criadas_email', 'headers': headers, 'data': data})
+for BRAND_ID in BRAND_IDS:
+    print(f"\n=== Processando BRAND_ID: {BRAND_ID} ===")
+    all_query_results = []
 
-print("Executando: Campanhas Criadas (SMS)...")
-headers, data = execute_query(QUERY_CAMPANHAS_SMS, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
-all_query_results.append({'name': 'campanhas_criadas_sms', 'headers': headers, 'data': data})
+    print("Executando: Campanhas Criadas (Email)...")
+    headers, data = execute_query(QUERY_CAMPANHAS_EMAIL, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
+    all_query_results.append({'name': 'campanhas_criadas_email', 'headers': headers, 'data': data})
 
-print("Executando: Campanhas Criadas (Agenda)...")
-headers, data = execute_query(QUERY_CAMPANHAS_AGENDA, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
-all_query_results.append({'name': 'campanhas_criadas_agenda', 'headers': headers, 'data': data})
+    print("Executando: Campanhas Criadas (SMS)...")
+    headers, data = execute_query(QUERY_CAMPANHAS_SMS, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
+    all_query_results.append({'name': 'campanhas_criadas_sms', 'headers': headers, 'data': data})
 
-print("Executando: Base Impactada (Email)...")
-headers, data = execute_query(QUERY_BASE_IMPACTADA_EMAIL, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
-all_query_results.append({'name': 'base_impactada_email', 'headers': headers, 'data': data})
+    print("Executando: Campanhas Criadas (Agenda)...")
+    headers, data = execute_query(QUERY_CAMPANHAS_AGENDA, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
+    all_query_results.append({'name': 'campanhas_criadas_agenda', 'headers': headers, 'data': data})
 
-print("Executando: Base Impactada (SMS)...")
-headers, data = execute_query(QUERY_BASE_IMPACTADA_SMS, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
-all_query_results.append({'name': 'base_impactada_sms', 'headers': headers, 'data': data})
+    print("Executando: Base Impactada (Email)...")
+    headers, data = execute_query(QUERY_BASE_IMPACTADA_EMAIL, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
+    all_query_results.append({'name': 'base_impactada_email', 'headers': headers, 'data': data})
 
-print("Executando: Base Impactada (Agenda)...")
-headers, data = execute_query(QUERY_BASE_IMPACTADA_AGENDA, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
-all_query_results.append({'name': 'base_impactada_agenda', 'headers': headers, 'data': data})
+    print("Executando: Base Impactada (SMS)...")
+    headers, data = execute_query(QUERY_BASE_IMPACTADA_SMS, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
+    all_query_results.append({'name': 'base_impactada_sms', 'headers': headers, 'data': data})
 
-print("Executando: Lojas Ativas...")
-headers, data = execute_query(QUERY_LOJAS_ATIVAS, {'brand_id': BRAND_ID})
-all_query_results.append({'name': 'lojas_ativas', 'headers': headers, 'data': data})
+    print("Executando: Base Impactada (Agenda)...")
+    headers, data = execute_query(QUERY_BASE_IMPACTADA_AGENDA, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
+    all_query_results.append({'name': 'base_impactada_agenda', 'headers': headers, 'data': data})
 
-print("Executando: Lojas Onboarding...")
-headers, data = execute_query(QUERY_LOJAS_ONBOARDING, {'brand_id': BRAND_ID})
-all_query_results.append({'name': 'lojas_onboarding', 'headers': headers, 'data': data})
+    print("Executando: Lojas Ativas...")
+    headers, data = execute_query(QUERY_LOJAS_ATIVAS, {'brand_id': BRAND_ID})
+    all_query_results.append({'name': 'lojas_ativas', 'headers': headers, 'data': data})
 
-print("Executando: Retorno Gatilhos...")
-headers, data = execute_query(QUERY_RFU_GATILHOS, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
-all_query_results.append({'name': 'retorno_gatilhos', 'headers': headers, 'data': data})
+    print("Executando: Lojas Onboarding...")
+    headers, data = execute_query(QUERY_LOJAS_ONBOARDING, {'brand_id': BRAND_ID})
+    all_query_results.append({'name': 'lojas_onboarding', 'headers': headers, 'data': data})
 
-print("Executando: Retorno Campanhas...")
-headers, data = execute_query(QUERY_RFU_CAMPANHAS, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
-all_query_results.append({'name': 'retorno_campanhas', 'headers': headers, 'data': data})
+    print("Executando: Retorno Gatilhos...")
+    headers, data = execute_query(QUERY_RFU_GATILHOS, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
+    all_query_results.append({'name': 'retorno_gatilhos', 'headers': headers, 'data': data})
 
-print("Executando: Retorno Cashback...")
-headers, data = execute_query(QUERY_RFU_CASHBACK, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
-all_query_results.append({'name': 'retorno_cashback', 'headers': headers, 'data': data})
+    print("Executando: Retorno Campanhas...")
+    headers, data = execute_query(QUERY_RFU_CAMPANHAS, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
+    all_query_results.append({'name': 'retorno_campanhas', 'headers': headers, 'data': data})
 
-print("Executando: Retorno Telemarketing...")
-headers, data = execute_query(QUERY_RFU_TELEMARKETING, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
-all_query_results.append({'name': 'retorno_telemarketing', 'headers': headers, 'data': data})
+    print("Executando: Retorno Cashback...")
+    headers, data = execute_query(QUERY_RFU_CASHBACK, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
+    all_query_results.append({'name': 'retorno_cashback', 'headers': headers, 'data': data})
 
-print("Executando: Retorno Total...")
-headers, data = execute_query(QUERY_RFU_TOTAL, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
-all_query_results.append({'name': 'retorno_total', 'headers': headers, 'data': data})
+    print("Executando: Retorno Telemarketing...")
+    headers, data = execute_query(QUERY_RFU_TELEMARKETING, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
+    all_query_results.append({'name': 'retorno_telemarketing', 'headers': headers, 'data': data})
+
+    print("Executando: Retorno Total...")
+    headers, data = execute_query(QUERY_RFU_TOTAL, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
+    all_query_results.append({'name': 'retorno_total', 'headers': headers, 'data': data})
+
+    all_brands_results.append(all_query_results)
 
 OUTPUT_CSV_FILE = 'relatorio_consolidado_mysql.csv'
-export_queries_to_single_csv(OUTPUT_CSV_FILE, all_query_results)
+export_queries_to_single_csv(OUTPUT_CSV_FILE, all_brands_results)
 print(f"\nRelatório consolidado salvo em '{OUTPUT_CSV_FILE}'")
