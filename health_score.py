@@ -1,22 +1,50 @@
 import csv
+import json
+import os
 import mysql.connector
 from mysql.connector import Error 
 
-DB_CONFIG = {
-    'host': '45.79.204.253',
-    'database': 'giver', 
-    'user': 'henrique.cardoso', 
-    'password': 'fycPDYzvREZt', 
-    'port': 3306
+# --- CARREGAR CONFIGURAÇÃO DE SERVIDORES E MAPEAMENTO ---
+CONFIG_PATH = os.path.join(os.path.dirname(__file__), 'config.json')
+if os.path.exists(CONFIG_PATH):
+  with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
+    _cfg = json.load(f)
+    SERVERS = _cfg.get('servers', {})
+    BRAND_TO_SERVER = _cfg.get('brand_to_server', {})
+else:
+  SERVERS = {}
+  BRAND_TO_SERVER = {}
+
+# Credenciais padrão (mesmas para todos os servidores)
+DB_DEFAULT_CONFIG = {
+  'user': 'henrique.cardoso',
+  'password': 'fycPDYzvREZt',
+  'port': 3306
 }
 
+# Host/database fallback (usado se não houver mapeamento)
+DB_FALLBACK_HOST = '45.79.204.253'
+DB_FALLBACK_DATABASE = 'giver'
+
 # --- PARÂMETROS PARA AS CONSULTAS (MODIFICADO PARA INPUT) ---
-BRAND_IDS_INPUT = input("Digite os BRAND_IDs (separados por vírgula, ex: 8, 9, 10): ")
+# Pedir ao usuário qual servidor processar (um único ID: 000..019)
+SERVER_ID_INPUT = input("Digite o SERVER_ID a processar (000..019, ex: 001): ").strip()
+if ',' in SERVER_ID_INPUT or SERVER_ID_INPUT.lower() == 'all' or SERVER_ID_INPUT == '':
+  print("Por favor informe um único SERVER_ID (ex: 000). Não use 'all' nem valores separados por vírgula.")
+  raise SystemExit(1)
+
+if SERVER_ID_INPUT not in SERVERS:
+  print(f"SERVER_ID '{SERVER_ID_INPUT}' não encontrado em config.json. Verifique e tente novamente.")
+  raise SystemExit(1)
+
 DATE_BEGIN = input("Digite a data de início (formato YYYY-MM-DD): ")
 DATE_UNTIL = input("Digite a data de término (formato YYYY-MM-DD): ")
 
-# Processar e limpar os brand_ids
-BRAND_IDS = [bid.strip() for bid in BRAND_IDS_INPUT.split(',')]
+# Derivar lista de brands deste servidor a partir do mapeamento
+BRAND_IDS = [b for b, sid in BRAND_TO_SERVER.items() if sid == SERVER_ID_INPUT]
+if not BRAND_IDS:
+  print(f"Nenhuma brand encontrada para o servidor {SERVER_ID_INPUT}.")
+  raise SystemExit(1)
 
 def execute_query(query, params):
     """
@@ -26,7 +54,26 @@ def execute_query(query, params):
     conn = None
     cursor = None
     try:
-        conn = mysql.connector.connect(**DB_CONFIG)
+        # determinar configuração do DB com base no brand
+        brand_id = str(params.get('brand_id')) if params.get('brand_id') is not None else None
+        # obter server id a partir do mapeamento
+        server_id = BRAND_TO_SERVER.get(brand_id) if brand_id else None
+        if server_id is None:
+            # fallback para '000' se não mapeado
+            server_id = '000'
+
+        # determinar host
+        host = SERVERS.get(server_id, DB_FALLBACK_HOST)
+        # determinar nome do database: 'giver' para 000, senão 'giver{server_id}'
+        database = DB_FALLBACK_DATABASE if server_id == '000' else f"giver{server_id}"
+
+        db_config = {
+            'host': host,
+            'database': database
+        }
+        db_config.update(DB_DEFAULT_CONFIG)
+
+        conn = mysql.connector.connect(**db_config)
         if conn.is_connected():
             cursor = conn.cursor()
 
@@ -68,24 +115,29 @@ def export_queries_to_single_csv(file_name, queries_data_list):
     Exporta dados de múltiplas marcas lado a lado como colunas em um único arquivo CSV.
     queries_data_list é uma lista de listas, onde cada lista contém os resultados de uma marca.
     """
-    with open(file_name, 'w', newline='', encoding='utf-8') as csv_file:
-        writer = csv.writer(csv_file, delimiter=';')
+    # Este exportador espera um dict de resultados por brand:
+    # results_by_brand = { '8': {metric_name: value, ...}, ... }
+    results_by_brand = queries_data_list
+    metric_names = [
+      'campanhas_criadas_email', 'campanhas_criadas_sms', 'campanhas_criadas_agenda',
+      'base_impactada_email', 'base_impactada_sms', 'base_impactada_agenda',
+      'lojas_ativas', 'lojas_onboarding',
+      'retorno_gatilhos', 'retorno_campanhas', 'retorno_cashback', 'retorno_telemarketing', 'retorno_total'
+    ]
 
-        # Escrever cabeçalhos (brand_id + nomes das colunas)
-        headers = ['brand_id'] + [q['name'] for q in queries_data_list[0]]
-        writer.writerow(headers)
-        
-        # Escrever dados linha por linha (uma linha por marca)
-        for brand_idx, queries_data in enumerate(queries_data_list):
-            row_data = [BRAND_IDS[brand_idx]]  # Adicionar brand_id como primeira coluna
-            for query_result in queries_data:
-                if query_result['data']:
-                    # Pega o primeiro valor da tupla
-                    value = query_result['data'][0][0] if query_result['data'][0] else ''
-                    row_data.append(value)
-                else:
-                    row_data.append('')
-            writer.writerow(row_data)
+    with open(file_name, 'w', newline='', encoding='utf-8') as csv_file:
+      writer = csv.writer(csv_file, delimiter=';')
+      headers = ['brand_id'] + metric_names
+      writer.writerow(headers)
+
+      for bid in results_by_brand.keys():
+        b = bid.strip()
+        row = [b]
+        values = results_by_brand.get(b, {})
+        for m in metric_names:
+          v = values.get(m, '')
+          row.append(v)
+        writer.writerow(row)
 
 # === QUERIES PARA CAMPANHAS CRIADAS ===
 QUERY_CAMPANHAS_EMAIL = """
@@ -405,66 +457,170 @@ from
 """
 
 # === EXECUTAR QUERIES E CONSTRUIR RESULTADOS ===
-all_brands_results = []
+# === EXECUTAR QUERIES POR SERVIDOR (AGRUPADO) ===
+def _placeholders_for(n):
+  return ','.join(['%s'] * n)
 
-for BRAND_ID in BRAND_IDS:
-    print(f"\n=== Processando BRAND_ID: {BRAND_ID} ===")
-    all_query_results = []
+def _to_ints(lst):
+  return [int(x) for x in lst]
 
-    print("Executando: Campanhas Criadas (Email)...")
-    headers, data = execute_query(QUERY_CAMPANHAS_EMAIL, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
-    all_query_results.append({'name': 'campanhas_criadas_email', 'headers': headers, 'data': data})
+def run_grouped():
+  # construir mapa contendo apenas o server solicitado e suas brands
+  server_map = {SERVER_ID_INPUT: [b for b in BRAND_IDS]}
 
-    print("Executando: Campanhas Criadas (SMS)...")
-    headers, data = execute_query(QUERY_CAMPANHAS_SMS, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
-    all_query_results.append({'name': 'campanhas_criadas_sms', 'headers': headers, 'data': data})
+  for server_id, brands in server_map.items():
+    print(f"\n=== Processando servidor {server_id} com brands: {brands} ===")
+    host = SERVERS.get(server_id, DB_FALLBACK_HOST)
+    database = DB_FALLBACK_DATABASE if server_id == '000' else f"giver{server_id}"
+    db_config = {'host': host, 'database': database}
+    db_config.update(DB_DEFAULT_CONFIG)
 
-    print("Executando: Campanhas Criadas (Agenda)...")
-    headers, data = execute_query(QUERY_CAMPANHAS_AGENDA, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
-    all_query_results.append({'name': 'campanhas_criadas_agenda', 'headers': headers, 'data': data})
+    # converter brands para ints e placeholders
+    brand_ints = _to_ints(brands)
+    if not brand_ints:
+      continue
+    ph = _placeholders_for(len(brand_ints))
 
-    print("Executando: Base Impactada (Email)...")
-    headers, data = execute_query(QUERY_BASE_IMPACTADA_EMAIL, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
-    all_query_results.append({'name': 'base_impactada_email', 'headers': headers, 'data': data})
+    try:
+      conn = mysql.connector.connect(**db_config)
+      cursor = conn.cursor()
 
-    print("Executando: Base Impactada (SMS)...")
-    headers, data = execute_query(QUERY_BASE_IMPACTADA_SMS, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
-    all_query_results.append({'name': 'base_impactada_sms', 'headers': headers, 'data': data})
+      # preparar dicionário local para este servidor
+      server_results = {b: {} for b in brands}
 
-    print("Executando: Base Impactada (Agenda)...")
-    headers, data = execute_query(QUERY_BASE_IMPACTADA_AGENDA, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
-    all_query_results.append({'name': 'base_impactada_agenda', 'headers': headers, 'data': data})
+      # 1) Campanhas criadas (Email/SMS/Agenda)
+      for m_name, type_delivery, qname in [
+          ('campanhas_criadas_email', 1, 'campanhas_criadas_email'),
+          ('campanhas_criadas_sms', 2, 'campanhas_criadas_sms'),
+          ('campanhas_criadas_agenda', 5, 'campanhas_criadas_agenda')
+      ]:
+          sql = (
+              f"SELECT brand_id, COUNT(*) FROM cli_campaign WHERE brand_id IN ({ph}) "
+              "AND type_delivery = %s AND created_at BETWEEN %s AND %s GROUP BY brand_id"
+          )
+          params = tuple(brand_ints) + (type_delivery, DATE_BEGIN, DATE_UNTIL)
+          cursor.execute(sql, params)
+          for row in cursor.fetchall():
+              bid, val = str(row[0]), row[1]
+              server_results.setdefault(bid, {})[m_name] = val
 
-    print("Executando: Lojas Ativas...")
-    headers, data = execute_query(QUERY_LOJAS_ATIVAS, {'brand_id': BRAND_ID})
-    all_query_results.append({'name': 'lojas_ativas', 'headers': headers, 'data': data})
+      # 2) Base impactada (Email/SMS/Agenda)
+      for m_name, delivery_type in [
+          ('base_impactada_email', 1),
+          ('base_impactada_sms', 2),
+          ('base_impactada_agenda', 5)
+      ]:
+          sql = (
+              f"SELECT brand_id, COUNT(DISTINCT customer_id) FROM cli_campaign_return WHERE brand_id IN ({ph}) "
+              "AND delivery_type = %s AND delivered_at BETWEEN %s AND %s GROUP BY brand_id"
+          )
+          params = tuple(brand_ints) + (delivery_type, DATE_BEGIN, DATE_UNTIL)
+          cursor.execute(sql, params)
+          for row in cursor.fetchall():
+              bid, val = str(row[0]), row[1]
+              server_results.setdefault(bid, {})[m_name] = val
 
-    print("Executando: Lojas Onboarding...")
-    headers, data = execute_query(QUERY_LOJAS_ONBOARDING, {'brand_id': BRAND_ID})
-    all_query_results.append({'name': 'lojas_onboarding', 'headers': headers, 'data': data})
+      # 3) Lojas (ativas/onboarding)
+      sql = f"SELECT brand_id, COUNT(*) FROM cli_store WHERE brand_id IN ({ph}) AND status_id = 1 GROUP BY brand_id"
+      cursor.execute(sql, tuple(brand_ints))
+      for row in cursor.fetchall():
+          bid, val = str(row[0]), row[1]
+          server_results.setdefault(bid, {})['lojas_ativas'] = val
 
-    print("Executando: Retorno Gatilhos...")
-    headers, data = execute_query(QUERY_RFU_GATILHOS, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
-    all_query_results.append({'name': 'retorno_gatilhos', 'headers': headers, 'data': data})
+      sql = f"SELECT brand_id, COUNT(*) FROM cli_store WHERE brand_id IN ({ph}) AND status_id = 7 GROUP BY brand_id"
+      cursor.execute(sql, tuple(brand_ints))
+      for row in cursor.fetchall():
+          bid, val = str(row[0]), row[1]
+          server_results.setdefault(bid, {})['lojas_onboarding'] = val
 
-    print("Executando: Retorno Campanhas...")
-    headers, data = execute_query(QUERY_RFU_CAMPANHAS, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
-    all_query_results.append({'name': 'retorno_campanhas', 'headers': headers, 'data': data})
+      # 4) RFU queries: gatilhos, campanhas, cashback, telemarketing, total
+      # We'll adapt the original RFU queries to aggregate by brand_id using IN (...) and GROUP BY q2.brand_id
+      def run_rfu(resource_names, metric_key):
+          resources_list = ','.join([f"'{r}'" for r in resource_names])
+          sql = f"""
+SELECT q2.brand_id, COALESCE(SUM(q2.total_consolidated - q2.debit_sum), 0) as value
+FROM (
+  select
+    q.brand_id,
+    q.customer_id,
+    sum(q.total_amount) as total_consolidated,
+    SUM(CASE WHEN q.resource_name IN ({resources_list}) THEN IFNULL(debits.total, 0) ELSE 0 END) as debit_sum
+  from (
+    select
+      cli_order_convertion.brand_id,
+      cli_order_convertion.store_id,
+      cli_order_convertion.order_id,
+      cli_order_convertion.customer_id,
+      cli_order.total_amount,
+      cli_order_convertion.resource_name
+    from
+      cli_order_convertion
+      inner join cli_order on cli_order.brand_id = cli_order_convertion.brand_id
+      and cli_order.customer_id = cli_order_convertion.customer_id
+      and cli_order.id = cli_order_convertion.order_id
+    where
+      cli_order_convertion.brand_id IN ({ph})
+      and cli_order_convertion.resource_name in ({resources_list})
+      and cli_order_convertion.converted_at >= %s
+      and cli_order_convertion.converted_at <= %s
+      and cli_order.total_amount > 0
+      and cli_order_convertion.dropped = 0
+  ) as q
+  left join (
+    select
+      cli_transaction.order_id,
+      cli_transaction.brand_id,
+      sum(cli_transaction.amount) AS total
+    from cli_transaction
+    where
+      cli_transaction.brand_id IN ({ph})
+      and cli_transaction.transaction_date >= %s
+      and cli_transaction.transaction_date <= %s
+      and cli_transaction.transaction_type_id in ('7')
+      and cli_transaction.order_id is not null
+      and cli_transaction.order_id > 0
+    group by cli_transaction.brand_id, cli_transaction.order_id
+  ) as debits on debits.brand_id = q.brand_id
+  and debits.order_id = q.order_id
+  group by q.brand_id, q.customer_id
+) as q2
+GROUP BY q2.brand_id;"""
 
-    print("Executando: Retorno Cashback...")
-    headers, data = execute_query(QUERY_RFU_CASHBACK, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
-    all_query_results.append({'name': 'retorno_cashback', 'headers': headers, 'data': data})
+          params = tuple(brand_ints) + (DATE_BEGIN, DATE_UNTIL) + tuple(brand_ints) + (DATE_BEGIN, DATE_UNTIL)
+          cursor.execute(sql, params)
+          for row in cursor.fetchall():
+              bid, val = str(row[0]), row[1]
+              server_results.setdefault(bid, {})[metric_key] = val
 
-    print("Executando: Retorno Telemarketing...")
-    headers, data = execute_query(QUERY_RFU_TELEMARKETING, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
-    all_query_results.append({'name': 'retorno_telemarketing', 'headers': headers, 'data': data})
+      # gatilhos
+      run_rfu(['cli_email_type', 'cli_trigger'], 'retorno_gatilhos')
+      # campanhas
+      run_rfu(['cli_campaign'], 'retorno_campanhas')
+      # cashback (resource cli_transaction in original)
+      run_rfu(['cli_transaction'], 'retorno_cashback')
+      # telemarketing
+      run_rfu(['cli_telemarketing_registry'], 'retorno_telemarketing')
+      # total (multiple resources)
+      run_rfu(['cli_campaign','cli_trigger','cli_email_type','cli_telemarketing_registry','cli_transaction'], 'retorno_total')
 
-    print("Executando: Retorno Total...")
-    headers, data = execute_query(QUERY_RFU_TOTAL, {'brand_id': BRAND_ID, 'date_begin': DATE_BEGIN, 'date_until': DATE_UNTIL})
-    all_query_results.append({'name': 'retorno_total', 'headers': headers, 'data': data})
+    except Error as e:
+      print(f"Erro ao conectar ou executar consultas no servidor {server_id} ({host}): {e}")
+    finally:
+      try:
+        cursor.close()
+      except:
+        pass
+      try:
+        conn.close()
+      except:
+        pass
+    # exportar arquivo para este servidor
+    out_file = f"relatorio_consolidado_server{server_id}.csv"
+    export_queries_to_single_csv(out_file, server_results)
+    print(f"Relatório do servidor {server_id} salvo em '{out_file}'")
 
-    all_brands_results.append(all_query_results)
+  return True
 
-OUTPUT_CSV_FILE = 'relatorio_consolidado_mysql.csv'
-export_queries_to_single_csv(OUTPUT_CSV_FILE, all_brands_results)
-print(f"\nRelatório consolidado salvo em '{OUTPUT_CSV_FILE}'")
+
+results = run_grouped()
+print('\nExecução concluída.')
