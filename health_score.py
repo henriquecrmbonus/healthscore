@@ -122,6 +122,7 @@ def export_queries_to_single_csv(file_name, queries_data_list):
       'campanhas_criadas_email', 'campanhas_criadas_sms', 'campanhas_criadas_agenda',
       'base_impactada_email', 'base_impactada_sms', 'base_impactada_agenda',
       'lojas_ativas', 'lojas_onboarding',
+      'clientes_totais', 'clientes_email_valido', 'clientes_celular_valido',
       'retorno_gatilhos', 'retorno_campanhas', 'retorno_cashback', 'retorno_telemarketing', 'retorno_total'
     ]
 
@@ -188,6 +189,25 @@ QUERY_LOJAS_ONBOARDING = """
 SELECT COUNT(*) 
 FROM cli_store
 WHERE brand_id = %s AND status_id = 7;
+"""
+
+# === QUERIES PARA CLIENTES ===
+QUERY_CLIENTES_TOTAIS = """
+SELECT COUNT(id) 
+FROM cli_customer
+WHERE brand_id = %s;
+"""
+
+QUERY_CLIENTES_EMAIL_VALIDO = """
+SELECT COUNT(id)
+FROM cli_customer
+WHERE brand_id = %s AND email REGEXP '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$';
+"""
+
+QUERY_CLIENTES_CELULAR_VALIDO = """
+SELECT COUNT(*)
+FROM cli_customer
+WHERE brand_id = %s AND LENGTH(mobile) = 11;
 """
 
 # === QUERIES PARA RETORNO (RFU) ===
@@ -533,7 +553,26 @@ def run_grouped():
           bid, val = str(row[0]), row[1]
           server_results.setdefault(bid, {})['lojas_onboarding'] = val
 
-      # 4) RFU queries: gatilhos, campanhas, cashback, telemarketing, total
+      # 4) Clientes (totais, email válido, celular válido)
+      sql = f"SELECT brand_id, COUNT(id) FROM cli_customer WHERE brand_id IN ({ph}) GROUP BY brand_id"
+      cursor.execute(sql, tuple(brand_ints))
+      for row in cursor.fetchall():
+          bid, val = str(row[0]), row[1]
+          server_results.setdefault(bid, {})['clientes_totais'] = val
+
+      sql = f"SELECT brand_id, COUNT(id) FROM cli_customer WHERE brand_id IN ({ph}) AND email REGEXP '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\\\.[A-Za-z]{{2,}}$' GROUP BY brand_id"
+      cursor.execute(sql, tuple(brand_ints))
+      for row in cursor.fetchall():
+          bid, val = str(row[0]), row[1]
+          server_results.setdefault(bid, {})['clientes_email_valido'] = val
+
+      sql = f"SELECT brand_id, COUNT(*) FROM cli_customer WHERE brand_id IN ({ph}) AND LENGTH(mobile) = 11 GROUP BY brand_id"
+      cursor.execute(sql, tuple(brand_ints))
+      for row in cursor.fetchall():
+          bid, val = str(row[0]), row[1]
+          server_results.setdefault(bid, {})['clientes_celular_valido'] = val
+
+      # 5) RFU queries: gatilhos, campanhas, cashback, telemarketing, total
       # We'll adapt the original RFU queries to aggregate by brand_id using IN (...) and GROUP BY q2.brand_id
       def run_rfu(resource_names, metric_key):
           resources_list = ','.join([f"'{r}'" for r in resource_names])
