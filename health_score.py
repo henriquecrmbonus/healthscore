@@ -119,11 +119,12 @@ def export_queries_to_single_csv(file_name, queries_data_list):
     # results_by_brand = { '8': {metric_name: value, ...}, ... }
     results_by_brand = queries_data_list
     metric_names = [
-      'campanhas_criadas_email', 'campanhas_criadas_sms', 'campanhas_criadas_agenda',
-      'base_impactada_email', 'base_impactada_sms', 'base_impactada_agenda',
+      'campanhas_ativas', 'campanhas_criadas_email', 'campanhas_criadas_sms', 'campanhas_criadas_agenda',
+      'base_impactada_total', 'base_impactada_email', 'base_impactada_sms', 'base_impactada_agenda',
       'lojas_ativas', 'lojas_onboarding',
       'clientes_totais', 'clientes_email_valido', 'clientes_celular_valido',
-      'retorno_gatilhos', 'retorno_campanhas', 'retorno_cashback', 'retorno_telemarketing', 'retorno_total'
+      'clientes_aniversario_valido',
+      'retorno_gatilhos', 'retorno_campanhas', 'retorno_cashback', 'retorno_telemarketing', 'taxa_associacao', 'retorno_total'
     ]
 
     with open(file_name, 'w', newline='', encoding='utf-8') as csv_file:
@@ -508,7 +509,14 @@ def run_grouped():
       # preparar dicionário local para este servidor
       server_results = {b: {} for b in brands}
 
-      # 1) Campanhas criadas (Email/SMS/Agenda)
+      # 1) Campanhas ativas
+      sql = f"SELECT brand_id, COUNT(*) FROM cli_campaign WHERE brand_id IN ({ph}) AND active = 1 GROUP BY brand_id"
+      cursor.execute(sql, tuple(brand_ints))
+      for row in cursor.fetchall():
+          bid, val = str(row[0]), row[1]
+          server_results.setdefault(bid, {})['campanhas_ativas'] = val
+
+      # 1b) Campanhas criadas (Email/SMS/Agenda)
       for m_name, type_delivery, qname in [
           ('campanhas_criadas_email', 1, 'campanhas_criadas_email'),
           ('campanhas_criadas_sms', 2, 'campanhas_criadas_sms'),
@@ -525,6 +533,17 @@ def run_grouped():
               server_results.setdefault(bid, {})[m_name] = val
 
       # 2) Base impactada (Email/SMS/Agenda)
+      # 2a) Base impactada total (todas as vias)
+      sql = (
+          f"SELECT brand_id, COUNT(DISTINCT customer_id) FROM cli_campaign_return WHERE brand_id IN ({ph}) "
+          "AND delivered_at BETWEEN %s AND %s GROUP BY brand_id"
+      )
+      params = tuple(brand_ints) + (DATE_BEGIN, DATE_UNTIL)
+      cursor.execute(sql, params)
+      for row in cursor.fetchall():
+          bid, val = str(row[0]), row[1]
+          server_results.setdefault(bid, {})['base_impactada_total'] = val
+
       for m_name, delivery_type in [
           ('base_impactada_email', 1),
           ('base_impactada_sms', 2),
@@ -571,6 +590,13 @@ def run_grouped():
       for row in cursor.fetchall():
           bid, val = str(row[0]), row[1]
           server_results.setdefault(bid, {})['clientes_celular_valido'] = val
+
+      # clientes com aniversário válido (não nulo nem '1900-01-01')
+      sql = f"SELECT brand_id, COUNT(id) FROM cli_customer WHERE brand_id IN ({ph}) AND birthday IS NOT NULL AND birthday != '1900-01-01' GROUP BY brand_id"
+      cursor.execute(sql, tuple(brand_ints))
+      for row in cursor.fetchall():
+          bid, val = str(row[0]), row[1]
+          server_results.setdefault(bid, {})['clientes_aniversario_valido'] = val
 
       # 5) RFU queries: gatilhos, campanhas, cashback, telemarketing, total
       # We'll adapt the original RFU queries to aggregate by brand_id using IN (...) and GROUP BY q2.brand_id
@@ -639,6 +665,20 @@ GROUP BY q2.brand_id;"""
       run_rfu(['cli_transaction'], 'retorno_cashback')
       # telemarketing
       run_rfu(['cli_telemarketing_registry'], 'retorno_telemarketing')
+
+      # taxa_associacao: vendas de clientes com name != 'CONSUMIDOR FINAL'
+      sql = (
+          f"SELECT co.brand_id, COUNT(co.id) FROM cli_order co "
+          f"INNER JOIN cli_customer cc ON co.customer_id = cc.id "
+          f"WHERE co.brand_id IN ({ph}) AND cc.name <> 'CONSUMIDOR FINAL' "
+          "AND co.order_date >= %s AND co.order_date <= %s GROUP BY co.brand_id"
+      )
+      params = tuple(brand_ints) + (DATE_BEGIN, DATE_UNTIL)
+      cursor.execute(sql, params)
+      for row in cursor.fetchall():
+          bid, val = str(row[0]), row[1]
+          server_results.setdefault(bid, {})['taxa_associacao'] = val
+
       # total (multiple resources)
       run_rfu(['cli_campaign','cli_trigger','cli_email_type','cli_telemarketing_registry','cli_transaction'], 'retorno_total')
 
@@ -653,8 +693,11 @@ GROUP BY q2.brand_id;"""
         conn.close()
       except:
         pass
-    # exportar arquivo para este servidor
-    out_file = f"relatorio_consolidado_server{server_id}.csv"
+    # exportar arquivo para este servidor — incluir período no nome do arquivo
+    # normalizar datas para uso em nome de arquivo (YYYYMMDD)
+    dbegin = DATE_BEGIN.replace('-', '') if DATE_BEGIN else ''
+    duntil = DATE_UNTIL.replace('-', '') if DATE_UNTIL else ''
+    out_file = f"relatorio_consolidado_server{server_id}_{dbegin}_to_{duntil}.csv"
     export_queries_to_single_csv(out_file, server_results)
     print(f"Relatório do servidor {server_id} salvo em '{out_file}'")
 
