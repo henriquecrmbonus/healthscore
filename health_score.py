@@ -515,8 +515,8 @@ def run_grouped():
       # preparar dicionário local para este servidor
       server_results = {b: {} for b in brands}
 
-      # 1) Campanhas ativas
-      sql = f"SELECT brand_id, COUNT(*) FROM cli_campaign WHERE brand_id IN ({ph}) AND active = 1 GROUP BY brand_id"
+      # 1) Campanhas ativas (status = 1)
+      sql = f"SELECT brand_id, COUNT(*) FROM cli_campaign WHERE brand_id IN ({ph}) AND status = 1 GROUP BY brand_id"
       cursor.execute(sql, tuple(brand_ints))
       for row in cursor.fetchall():
           bid, val = str(row[0]), row[1]
