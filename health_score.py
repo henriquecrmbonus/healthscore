@@ -119,12 +119,14 @@ def export_queries_to_single_csv(file_name, queries_data_list):
     # results_by_brand = { '8': {metric_name: value, ...}, ... }
     results_by_brand = queries_data_list
     metric_names = [
+      'ano_mes',
       'campanhas_ativas', 'campanhas_criadas_email', 'campanhas_criadas_sms', 'campanhas_criadas_agenda',
       'base_impactada_total', 'base_impactada_email', 'base_impactada_sms', 'base_impactada_agenda',
       'lojas_ativas', 'lojas_onboarding',
       'clientes_totais', 'clientes_email_valido', 'clientes_celular_valido',
       'clientes_aniversario_valido',
-      'retorno_gatilhos', 'retorno_campanhas', 'retorno_cashback', 'retorno_telemarketing', 'taxa_associacao', 'retorno_total'
+      'total_vendas', 'total_vendas_associadas',
+      'retorno_gatilhos', 'retorno_campanhas', 'retorno_cashback', 'retorno_telemarketing', 'retorno_total'
     ]
 
     with open(file_name, 'w', newline='', encoding='utf-8') as csv_file:
@@ -137,7 +139,11 @@ def export_queries_to_single_csv(file_name, queries_data_list):
         row = [b]
         values = results_by_brand.get(b, {})
         for m in metric_names:
-          v = values.get(m, '')
+          if m == 'ano_mes':
+            # ano_mes is computed from DATE_BEGIN in format YYYY-MM
+            v = DATE_BEGIN[:7] if DATE_BEGIN else ''
+          else:
+            v = values.get(m, '')
           row.append(v)
         writer.writerow(row)
 
@@ -666,7 +672,19 @@ GROUP BY q2.brand_id;"""
       # telemarketing
       run_rfu(['cli_telemarketing_registry'], 'retorno_telemarketing')
 
-      # taxa_associacao: vendas de clientes com name != 'CONSUMIDOR FINAL'
+      # total_vendas: contagem de todas as vendas no período
+      sql = (
+          f"SELECT brand_id, COUNT(id) FROM cli_order "
+          f"WHERE brand_id IN ({ph}) "
+          "AND order_date >= %s AND order_date <= %s GROUP BY brand_id"
+      )
+      params = tuple(brand_ints) + (DATE_BEGIN, DATE_UNTIL)
+      cursor.execute(sql, params)
+      for row in cursor.fetchall():
+          bid, val = str(row[0]), row[1]
+          server_results.setdefault(bid, {})['total_vendas'] = val
+
+      # total_vendas_associadas: vendas de clientes com name != 'CONSUMIDOR FINAL'
       sql = (
           f"SELECT co.brand_id, COUNT(co.id) FROM cli_order co "
           f"INNER JOIN cli_customer cc ON co.customer_id = cc.id "
@@ -677,7 +695,7 @@ GROUP BY q2.brand_id;"""
       cursor.execute(sql, params)
       for row in cursor.fetchall():
           bid, val = str(row[0]), row[1]
-          server_results.setdefault(bid, {})['taxa_associacao'] = val
+          server_results.setdefault(bid, {})['total_vendas_associadas'] = val
 
       # total (multiple resources)
       run_rfu(['cli_campaign','cli_trigger','cli_email_type','cli_telemarketing_registry','cli_transaction'], 'retorno_total')
